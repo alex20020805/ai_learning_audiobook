@@ -21,6 +21,7 @@ A decision-ready three-horizon product specification for a local-first private w
 - [Select the local and hosted model runtime strategy](./issues/02-select-local-and-hosted-model-runtime-strategy.md) — route identical structured jobs through loopback llama.cpp or ChatGPT-authenticated `codex exec`; paid API fallback stays disabled until per-job approval.
 - [Select hosted and local speech candidates](./issues/03-select-hosted-and-local-speech-candidates.md) — compare pinned OpenAI GPT-4o mini TTS/`marin` with local Kokoro-82M/`af_heart`, assemble shared 24 kHz WAV chunks, and deliver AAC-LC/M4A.
 - [Design the fidelity and listening evaluation](./issues/04-design-the-fidelity-and-listening-evaluation.md) — use zero-tolerance trust gates, measurable stage thresholds, three 18–24 minute reference slices, blinded model comparisons, and full-Episode listening endurance.
+- [Prototype hierarchy-aware Episode packing](./issues/05-prototype-hierarchy-aware-episode-packing.md) — globally partition ordered atomic SourceNodes into a hard 15–25 minute window targeting 20 minutes, favor semantic and chapter boundaries, cross chapters to prevent short tails, and surface every unverified split for review.
 
 ## Not yet specified
 
