@@ -1,0 +1,37 @@
+# Notes
+
+- The user listens while walking or commuting and prefers 15–25 minute sessions.
+- Initial examples include AI engineering books, *The Pragmatic Programmer*, and other technical nonfiction.
+- Cloud processing and paid model or speech APIs are acceptable; playback must work offline on iPhone.
+- The first specification ends at faithful PDF-chapter-to-audio conversion.
+- Adaptive review should be designed later as a separate learning system that may read and write Obsidian state.
+- The current Teach skill is inspiration, not a product dependency; some of its questioning assumptions may need reconsideration before reuse.
+- The first implementation may narrate prose verbatim; the target Faithful Track lightly adapts prose for listening without substantive omission.
+- Long chapters become multiple 15–25 minute Episodes rather than being compressed.
+- The Faithful Track never adds outside explanations. A future Guided Track may add clearly labeled and independently cited explanations or examples informed by Obsidian.
+- Code, tables, equations, figures, and screenshots should be narrated for purpose and important details with source references; uncertainty must be disclosed.
+- Chapter detection is automatic but boundaries remain user-correctable.
+- Each Audio Lesson includes a transcript with page references and a Transformation Report.
+- Initial use is private and limited to lawfully possessed PDFs; public sharing and commercial distribution are excluded.
+- The product surface is a private web application. MVP delivery is a directly downloadable MP3 or M4A suitable for offline iPhone playback.
+- The MVP accepts native-text PDFs and rejects scan-heavy documents rather than performing OCR.
+- Users confirm detected chapter boundaries; transcript review is optional unless extraction warnings require intervention.
+- The pilot generates on demand and may process asynchronously without a strict latency target.
+- The longer-term vision retains and indexes an entire book once, then allocates it across a 30- or 60-day Learning Plan instead of requiring repeated manual PDF splitting.
+- The system calculates plan length from estimated narration duration rather than forcing a user-selected day count.
+- Generation is progress-gated: no next Episode is generated until the learner completes the current quiz or check-in. There is no rolling synthesis buffer.
+- Clarification questions and quiz performance are Learner Evidence that may influence later Guided Track content.
+- The active plan retains the original PDF, Source Index, and generated outputs. Retrieval must use an explicit memory hierarchy and relevance budget rather than loading the whole history into a model context.
+- Pilot safety ceilings are US$1 per Episode and US$25 per book, with explicit confirmation required for an override.
+- Pilot evaluation uses three structurally different selections from the user's copy of *AI Engineering* by Chip Huyen.
+- Compare hosted proprietary and local/open models for applicable text-generation steps. The available local candidate is `qwen3.5-9b-local` served by llama.cpp.
+- The Episode packing target is 20 minutes within a permitted 15–25 minute range.
+- When a full quiz is impractical, a shorter verbal check-in may satisfy the Progress Gate.
+- The agreed Learner Memory hierarchy separates immutable source, produced artifacts, recent context, Learner Evidence, a compact concept-level Learner Model, and the bounded retrieval set for the next lesson.
+- Model routing is stage-specific. The user will manually inspect evaluation results, and the system should prefer one hosted candidate rather than paying to compare several hosted models.
+- Prefer existing ChatGPT/Codex access for pilot text-generation work where supported; separately billed API usage should be minimized.
+- The pilot is local-first: a private browser UI connects to a Local Orchestrator on the user's Mac, with iPhone access limited to an authorized network path.
+- If Codex subscription access is unavailable or rate-limited, ask before using separately billed API credit.
+- Evaluate one hosted TTS engine against one local speech engine independently from Hosted-versus-Local text-model evaluation.
+- The fallback check-in is typed, not spoken.
+- The application owns structured learner state. Obsidian represents identity and cross-project context, is read only from explicitly approved locations, and receives no learning-state writes unless the user explicitly requests them.
