@@ -17,7 +17,10 @@ A decision-ready three-horizon product specification for a local-first private w
 
 ## Decisions so far
 
-<!-- Resolved ticket pointers are appended here. -->
+- [Select the native-PDF extraction and indexing strategy](./issues/01-select-native-pdf-extraction-and-indexing-strategy.md) — use pypdf plus pdfplumber/pdfminer to build a provenance-preserving Source Index, with explicit rejection, block, and warning states and model interpretation kept as non-destructive enrichment.
+- [Select the local and hosted model runtime strategy](./issues/02-select-local-and-hosted-model-runtime-strategy.md) — route identical structured jobs through loopback llama.cpp or ChatGPT-authenticated `codex exec`; paid API fallback stays disabled until per-job approval.
+- [Select hosted and local speech candidates](./issues/03-select-hosted-and-local-speech-candidates.md) — compare pinned OpenAI GPT-4o mini TTS/`marin` with local Kokoro-82M/`af_heart`, assemble shared 24 kHz WAV chunks, and deliver AAC-LC/M4A.
+- [Design the fidelity and listening evaluation](./issues/04-design-the-fidelity-and-listening-evaluation.md) — use zero-tolerance trust gates, measurable stage thresholds, three 18–24 minute reference slices, blinded model comparisons, and full-Episode listening endurance.
 
 ## Not yet specified
 
