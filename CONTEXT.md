@@ -8,6 +8,10 @@ This context describes a personal system that transforms selected source materia
 A user-supplied technical or nonfiction PDF from which learning material is derived.
 _Avoid_: Knowledge base, training data
 
+**Book Workspace**:
+A persistent product space anchored to one immutable Source Document edition and its derived structure, plan, Episodes, and progress.
+_Avoid_: Upload, job, mutable book file
+
 **Source Chapter**:
 The user-selected chapter or comparable section of a Source Document that bounds one transformation request.
 _Avoid_: Upload, corpus
@@ -21,8 +25,20 @@ A source-grounded audio artifact derived from a Source Chapter and intended for 
 _Avoid_: AI knowledge download, podcast
 
 **Episode**:
-One 15–25 minute part of an Audio Lesson. Episode boundaries preserve source meaning rather than compressing it to fit a duration target.
+One duration-bounded part of an Audio Lesson. It defaults to 15–25 minutes, while its Book workspace may use an approved custom range; source meaning still governs its boundaries.
 _Avoid_: Summary, chunk
+
+**Listening Session**:
+One planned Episode intended for a single period of learner consumption, without implying a calendar date.
+_Avoid_: Generation job, day, playback event
+
+**Document Processing Job**:
+A versioned attempt to validate a Source Document and create or update its Source Index and provisional Learning Plan.
+_Avoid_: Episode generation, upload
+
+**Episode Generation Job**:
+A versioned attempt to produce one Episode from a confirmed source span and duration policy.
+_Avoid_: Listening Session, entire chapter run
 
 **Faithful Track**:
 An Audio Lesson mode containing no outside explanation. Its initial form narrates source prose verbatim; its target form may lightly adapt prose for listening without omitting substantive content.
@@ -45,15 +61,15 @@ A future, separate system that uses retrieval and learner state to support reten
 _Avoid_: Teach skill, audiobook generator
 
 **Learning Plan**:
-A future ordered program that calculates how many days a Source Document requires, then connects Audio Lessons with review and learner progress.
-_Avoid_: File split, cron job
+An ordered program of Listening Sessions derived from a Source Document, initially estimated from coarse structure and refined as source spans are processed.
+_Avoid_: File split, cron job, calendar schedule
 
 **Learner Evidence**:
 A quiz result, completion check-in, or clarification question that reveals progress or a possible knowledge gap.
 _Avoid_: Chat history, user memory
 
 **Progress Gate**:
-The requirement that the learner complete a quiz or shorter verbal check-in before generation of the next Audio Lesson begins.
+The requirement that the learner complete a quiz or shorter verbal check-in before generation of the next Episode begins.
 _Avoid_: Cron job, rolling buffer
 
 **Learner Memory**:

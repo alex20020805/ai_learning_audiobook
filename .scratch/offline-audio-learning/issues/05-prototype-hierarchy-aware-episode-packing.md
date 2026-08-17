@@ -15,3 +15,7 @@ Use a hierarchy-aware global partitioner over ordered atomic SourceNodes. Keep 1
 The accepted prototype used real outline and page-word data from *AI Engineering*. At the default 140 words per minute it produced 55 Episodes totaling approximately 18 hours 55 minutes, with no short tails or unresolved duration failures and 17 explicitly provisional page-level boundaries. The math and code/visual stress slices each remained intact within the duration window. The user accepted this behavior on 2026-08-15.
 
 The disposable implementation remains on branch `prototype/episode-packing`: initial behavior commit `c3fb03e`, documented-function commit `cd7ac61`. It is decision evidence, not production code, and is intentionally not merged into the main branch.
+
+## Superseded assumption
+
+Ticket 06 generalizes the prototype's fixed 15–25-minute hard window into the product's default duration policy. Its hierarchy-aware global partitioning, semantic-boundary preference, and explicit handling of unverified splits remain accepted. Custom bounds and approved short-tail exceptions are defined in [the local-first workflow decision](./06-decide-the-local-first-product-workflow.md).

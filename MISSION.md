@@ -1,10 +1,10 @@
 # Mission: Trustworthy Offline Learning from Technical Books
 
 ## Why
-Convert difficult chapters from technical and nonfiction books into trustworthy 15–25 minute audio lessons that can be understood while walking or commuting without Wi-Fi, then retained through later review.
+Convert difficult chapters from technical and nonfiction books into trustworthy, duration-bounded audio lessons that can be understood while walking or commuting without Wi-Fi, then retained through later review. The default Episode range is 15–25 minutes.
 
 ## Success looks like
-- Select a detected chapter from a PDF, correct its boundaries, and receive faithful audio split into 15–25 minute parts.
+- Select a detected chapter from a PDF, correct its boundaries, and receive faithful audio split into semantically coherent Episodes within the confirmed duration policy.
 - Download the finished lesson to an iPhone and play it without a network connection.
 - Verify fidelity through a transcript with page references and a transformation report.
 - Later reinforce the material through a separate adaptive learning system connected to Obsidian.
@@ -16,7 +16,7 @@ Convert difficult chapters from technical and nonfiction books into trustworthy 
 - The specification uses three horizons: verbatim MVP, target Faithful Track, and future Guided Track and Learning Plan.
 - The first implementation may narrate source prose verbatim; the target faithful experience may lightly rewrite it for listening without omitting substantive content.
 - Generation may use paid cloud services, including OpenAI, Anthropic, and speech providers.
-- Each finished lesson should target 15–25 minutes.
+- Episodes default to 15–25 minutes. A Book workspace may instead choose bounds from 5–30 minutes when the range is 5–10 minutes wide; the target is the midpoint.
 - The initial content domain is technical and nonfiction books.
 - Pilot spending requires confirmation and is capped at US$1 per Episode and US$25 per book unless explicitly overridden.
 
