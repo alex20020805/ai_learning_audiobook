@@ -160,6 +160,7 @@ def create_app(data_root: Path) -> FastAPI:
                 edition_of=edition_of,
             )
         except SourceRejected as error:
+            current_run().record("validation_completed", outcome="rejected", error_code=error.code)
             return JSONResponse(
                 status_code=422,
                 content={

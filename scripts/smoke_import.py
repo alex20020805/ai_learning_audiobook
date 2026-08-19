@@ -48,6 +48,7 @@ async def smoke_import(source_path: Path) -> dict[str, object]:
             "run_id": payload.get("run_id"),
             "page_count": source_document.get("page_count"),
             "validation": validation.get("outcome"),
+            "warning_count": len(validation.get("warnings", [])),
             "heading_count": len(structural_scan.get("headings", [])),
             "error": payload.get("error"),
         }

@@ -22,6 +22,8 @@ _active_span_id: ContextVar[str | None] = ContextVar("active_trace_span_id", def
 _secret_keys = frozenset(
     {"authorization", "cookie", "password", "secret", "token", "api_key", "api-key"}
 )
+TRACE_SCHEMA_VERSION = "1"
+SOFTWARE_VERSION = "0.1.0"
 
 
 def _utc_now() -> str:
@@ -138,6 +140,10 @@ class TraceRun:
         self.events_path = self.root / "events.jsonl"
         self.manifest_path = self.root / "manifest.json"
         self._event_count = 0
+        self._started_at = _utc_now()
+        self._completed_at: str | None = None
+        self._request: dict[str, str] | None = None
+        self._artifacts: list[dict[str, str]] = []
         self._write_manifest(outcome="running")
 
     def _write_manifest(self, *, outcome: str) -> None:
@@ -154,8 +160,15 @@ class TraceRun:
         """
         manifest = {
             "run_id": self.run_id,
+            "request_correlation_id": self.run_id,
             "outcome": outcome,
             "event_count": self._event_count,
+            "started_at": self._started_at,
+            "completed_at": self._completed_at,
+            "trace_schema_version": TRACE_SCHEMA_VERSION,
+            "software_version": SOFTWARE_VERSION,
+            "request": self._request,
+            "artifacts": self._artifacts,
         }
         temporary = self.manifest_path.with_suffix(".json.tmp")
         temporary.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
@@ -175,6 +188,19 @@ class TraceRun:
             Propagates durable-write failures so missing trace evidence is never silent.
         """
         self._event_count += 1
+        if event_type == "request_received":
+            self._request = {
+                "method": str(details.get("method", "")),
+                "path": str(details.get("path", "")),
+            }
+        if event_type == "artifact_written":
+            self._artifacts.append(
+                {
+                    "path": str(details.get("path", "")),
+                    "media_type": str(details.get("media_type", "")),
+                    "sha256": str(details.get("sha256", "")),
+                }
+            )
         event: dict[str, JsonValue] = {
             "run_id": self.run_id,
             "sequence": self._event_count,
@@ -199,6 +225,7 @@ class TraceRun:
         Failures:
             Propagates durable-write failures.
         """
+        self._completed_at = _utc_now()
         self._write_manifest(outcome=outcome)
 
     @contextlib.contextmanager

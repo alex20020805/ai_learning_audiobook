@@ -49,6 +49,12 @@ PRIVATE_APPLICATION_HTML = """<!doctype html>
     const status = document.querySelector("#status");
     const result = document.querySelector("#workspace-result");
 
+    /**
+     * Inputs: none; reads no arguments and uses the Book Workspace collection endpoint.
+     * Functionality: adds every retained Book Workspace as an explicit prior-edition option.
+     * Outputs: Promise<void> after the selector is populated.
+     * Failures: rejects when the collection request or JSON parsing fails.
+     */
     async function refreshEditions() {
       const response = await fetch("/api/book-workspaces");
       const payload = await response.json();

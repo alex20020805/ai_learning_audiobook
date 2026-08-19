@@ -4,17 +4,20 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+from difflib import SequenceMatcher
 from io import BytesIO
 from pathlib import Path
 from typing import NotRequired, TypedDict, cast
 from uuid import uuid4
 
 import pdfplumber
+from pdfminer.pdfparser import PDFSyntaxError
 from pypdf import PdfReader
 from pypdf.errors import PdfReadError
 from pypdf.generic import Destination
 
-from ai_learning_audiobook.tracing import record_artifact, traced
+from ai_learning_audiobook.tracing import current_run, record_artifact, traced
 
 
 class SourceRejected(Exception):
@@ -69,6 +72,7 @@ class StructureWarning(TypedDict):
     """Inspectable disagreement between outline and visible-heading evidence."""
 
     code: str
+    severity: str
     physical_page_number: int
     printed_page_label: str
     outline_title: str
@@ -150,11 +154,32 @@ def is_scan_heavy(source_bytes: bytes, page_texts: list[str]) -> bool:
                 > page_area * 0.5
                 for image in images
             )
-            if len(text) < 20 and has_large_raster:
+            if has_large_raster:
                 scan_suspected_pages += 1
     if native_text_pages == 0:
         return True
     return nonblank_pages > 0 and scan_suspected_pages / nonblank_pages > 0.10
+
+
+@traced
+def normalize_heading_title(title: str) -> str:
+    """Normalize harmless chapter-prefix differences for evidence comparison.
+
+    Inputs:
+        title: Outline or visible heading text.
+    Functionality:
+        Case-folds text, removes leading Chapter/number markers, strips punctuation, and
+        collapses whitespace without changing the retained evidence itself.
+    Outputs:
+        A comparison-only normalized heading string.
+    Failures:
+        Does not raise for valid Python strings.
+    """
+    normalized = title.casefold().strip()
+    normalized = re.sub(r"^chapter\s+", "", normalized)
+    normalized = re.sub(r"^\d+(?:\.\d+)*[\s.:–—-]+", "", normalized)
+    normalized = re.sub(r"[^\w\s]", " ", normalized)
+    return " ".join(normalized.split())
 
 
 @traced
@@ -184,12 +209,22 @@ def detect_top_level_headings(
         page_index = reader.get_destination_page_number(outline_item)
         if page_index is None or page_index < 0:
             continue
-        visible_heading = next(
-            (line.strip() for line in page_texts[page_index].splitlines() if line.strip()),
-            "",
-        )
+        visible_candidates = [
+            line.strip() for line in page_texts[page_index].splitlines() if line.strip()
+        ][:12]
         printed_page_label = page_labels[page_index]
         outline_title = str(outline_item.title or "")
+        normalized_outline = normalize_heading_title(outline_title)
+        visible_heading = max(
+            visible_candidates,
+            key=lambda candidate: SequenceMatcher(
+                None, normalized_outline, normalize_heading_title(candidate)
+            ).ratio(),
+            default="",
+        )
+        similarity = SequenceMatcher(
+            None, normalized_outline, normalize_heading_title(visible_heading)
+        ).ratio()
         headings.append(
             {
                 "title": outline_title,
@@ -202,10 +237,11 @@ def detect_top_level_headings(
                 },
             }
         )
-        if outline_title.casefold().strip() != visible_heading.casefold().strip():
+        if similarity < 0.78:
             warnings.append(
                 {
                     "code": "outline_visible_heading_mismatch",
+                    "severity": "review_required",
                     "physical_page_number": page_index + 1,
                     "printed_page_label": printed_page_label,
                     "outline_title": outline_title,
@@ -215,22 +251,43 @@ def detect_top_level_headings(
     if headings:
         return headings, warnings
 
-    first_page_text = page_texts[0]
     fallback: list[Heading] = []
-    fallback_heading = next(
-        (line.strip() for line in first_page_text.splitlines() if line.strip()), None
-    )
-    if fallback_heading is not None:
-        fallback.append(
-            Heading(
-                title=fallback_heading,
-                physical_page_number=1,
-                printed_page_label=page_labels[0],
-                evidence=HeadingEvidence(
-                    visible_heading=fallback_heading, sources=["visible_heading"]
-                ),
-            )
+    for page_index, page_text in enumerate(page_texts):
+        candidates = [line.strip() for line in page_text.splitlines() if line.strip()]
+        fallback_heading = next(
+            (
+                candidate
+                for candidate in candidates[:12]
+                if re.match(r"^(?:chapter\s+)?\d+(?:\.\d+)*[\s.:–—-]", candidate, re.I)
+            ),
+            None,
         )
+        if fallback_heading is not None:
+            fallback.append(
+                Heading(
+                    title=fallback_heading,
+                    physical_page_number=page_index + 1,
+                    printed_page_label=page_labels[page_index],
+                    evidence=HeadingEvidence(
+                        visible_heading=fallback_heading, sources=["visible_heading"]
+                    ),
+                )
+            )
+    if not fallback:
+        first_heading = next(
+            (line.strip() for line in page_texts[0].splitlines() if line.strip()), None
+        )
+        if first_heading is not None:
+            fallback.append(
+                Heading(
+                    title=first_heading,
+                    physical_page_number=1,
+                    printed_page_label=page_labels[0],
+                    evidence=HeadingEvidence(
+                        visible_heading=first_heading, sources=["visible_heading"]
+                    ),
+                )
+            )
     return fallback, warnings
 
 
@@ -260,12 +317,19 @@ def inspect_source_document(source_bytes: bytes) -> SourceInspection:
             "corrupt_pdf", "The Source Document could not be parsed as a PDF."
         ) from error
 
-    if not page_texts or is_scan_heavy(source_bytes, page_texts):
+    try:
+        scan_heavy = not page_texts or is_scan_heavy(source_bytes, page_texts)
+    except (PDFSyntaxError, OSError, ValueError) as error:
+        raise SourceRejected(
+            "corrupt_pdf", "The Source Document layout could not be inspected safely."
+        ) from error
+    if scan_heavy:
         raise SourceRejected(
             "scan_heavy", "The Source Document does not contain enough native text."
         )
 
     headings, warnings = detect_top_level_headings(reader, page_texts)
+    current_run().record("validation_completed", outcome="accepted", warnings=warnings)
     document_title = str(reader.metadata.title or "") if reader.metadata else ""
     return {
         "page_count": len(page_texts),

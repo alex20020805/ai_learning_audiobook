@@ -1,4 +1,5 @@
 import ast
+import re
 from pathlib import Path
 
 
@@ -34,5 +35,12 @@ def test_every_named_function_has_a_human_oriented_contract() -> None:
                 failures.append(
                     f"{relative}:{node.lineno} {node.name} missing {', '.join(missing)}"
                 )
+
+    browser_source = (source_root / "web.py").read_text(encoding="utf-8")
+    for match in re.finditer(r"(?:async\s+)?function\s+(\w+)\s*\(", browser_source):
+        documentation = browser_source[max(0, match.start() - 500) : match.start()]
+        missing = sorted(section for section in required_sections if section not in documentation)
+        if missing:
+            failures.append(f"web.py {match.group(1)} missing {', '.join(missing)}")
 
     assert failures == []

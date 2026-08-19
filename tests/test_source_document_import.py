@@ -294,11 +294,22 @@ async def test_import_run_exposes_correlated_function_and_artifact_traces(
     trace = traced.json()
     assert trace["manifest"]["run_id"] == run_id
     assert trace["manifest"]["outcome"] == "completed"
+    assert trace["manifest"]["request_correlation_id"] == run_id
+    assert trace["manifest"]["trace_schema_version"] == "1"
+    assert trace["manifest"]["software_version"] == "0.1.0"
+    assert trace["manifest"]["started_at"]
+    assert trace["manifest"]["completed_at"]
+    assert trace["manifest"]["request"] == {
+        "method": "POST",
+        "path": "/api/book-workspaces/import",
+    }
+    assert len(trace["manifest"]["artifacts"]) == 2
     assert {event["event_type"] for event in trace["events"]} >= {
         "request_received",
         "function_started",
         "function_completed",
         "artifact_written",
+        "validation_completed",
         "request_completed",
     }
     assert {event.get("function") for event in trace["events"]} >= {
@@ -412,6 +423,7 @@ async def test_structural_scan_prefers_top_level_pdf_outline_evidence(tmp_path: 
     assert response.json()["workspace"]["validation"]["warnings"] == [
         {
             "code": "outline_visible_heading_mismatch",
+            "severity": "review_required",
             "physical_page_number": 1,
             "printed_page_label": "1",
             "outline_title": "Chapter One: Foundations",
