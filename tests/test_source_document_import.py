@@ -1,3 +1,4 @@
+import hashlib
 from io import BytesIO
 from pathlib import Path
 
@@ -88,6 +89,32 @@ def make_outlined_pdf(outline_title: str) -> bytes:
     return output.getvalue()
 
 
+def make_native_text_pdf_with_blank_dividers() -> bytes:
+    """Create a native-text PDF containing intentional blank divider pages.
+
+    Inputs:
+        None.
+    Functionality:
+        Renders nine substantive text pages and two blank pages without raster scans.
+    Outputs:
+        PDF bytes that distinguish blank layout from scan-heavy content.
+    Failures:
+        Propagates ReportLab errors when the fixture cannot be rendered.
+    """
+    output = BytesIO()
+    canvas = Canvas(output)
+    for page_index in range(11):
+        if page_index not in {2, 7}:
+            canvas.drawString(
+                72,
+                740,
+                f"Native text page {page_index + 1} contains enough substantive prose.",
+            )
+        canvas.showPage()
+    canvas.save()
+    return output.getvalue()
+
+
 @pytest.mark.asyncio
 async def test_learner_can_import_a_native_text_source_document(tmp_path: Path) -> None:
     """Verify that an acceptable PDF creates a visible Book Workspace.
@@ -127,7 +154,7 @@ async def test_learner_can_import_a_native_text_source_document(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-async def test_identical_content_reopens_and_changed_content_creates_an_edition(
+async def test_identical_content_reopens_and_only_explicit_changed_content_links_an_edition(
     tmp_path: Path,
 ) -> None:
     """Verify immutable content identity across repeated imports.
@@ -144,6 +171,7 @@ async def test_identical_content_reopens_and_changed_content_creates_an_edition(
     app = create_app(data_root=tmp_path)
     original = make_native_text_pdf("Chapter One", "The original edition.")
     changed = make_native_text_pdf("Chapter One", "A corrected second edition.")
+    unrelated = make_native_text_pdf("Chapter One", "An unrelated book with reused metadata.")
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         first = await client.post(
@@ -159,7 +187,19 @@ async def test_identical_content_reopens_and_changed_content_creates_an_edition(
         edition = await client.post(
             "/api/book-workspaces/import",
             content=changed,
-            headers={"content-type": "application/pdf", "x-source-filename": "second.pdf"},
+            headers={
+                "content-type": "application/pdf",
+                "x-source-filename": "second.pdf",
+                "x-source-edition-of": first.json()["workspace"]["workspace_id"],
+            },
+        )
+        unrelated_result = await client.post(
+            "/api/book-workspaces/import",
+            content=unrelated,
+            headers={
+                "content-type": "application/pdf",
+                "x-source-filename": "unrelated.pdf",
+            },
         )
 
     assert first.status_code == 201
@@ -174,6 +214,8 @@ async def test_identical_content_reopens_and_changed_content_creates_an_edition(
         edition.json()["workspace"]["source_document"]["edition_of"]
         == first.json()["workspace"]["workspace_id"]
     )
+    assert unrelated_result.status_code == 201
+    assert unrelated_result.json()["workspace"]["source_document"]["edition_of"] is None
 
 
 @pytest.mark.parametrize(
@@ -273,6 +315,35 @@ async def test_import_run_exposes_correlated_function_and_artifact_traces(
     serialized = str(trace)
     assert "must-not-be-logged" not in serialized
     assert pdf.hex() not in serialized
+    endpoint_start = next(
+        event
+        for event in trace["events"]
+        if event["event_type"] == "function_started"
+        and event.get("function") == "import_source_document"
+    )
+    assert endpoint_start["inputs"]["source_bytes"] == received["body"]
+    middleware_start = next(
+        event
+        for event in trace["events"]
+        if event["event_type"] == "function_started"
+        and event.get("function") == "trace_http_request"
+    )
+    assert endpoint_start["parent_span_id"] == middleware_start["span_id"]
+    publication = next(
+        event
+        for event in trace["events"]
+        if event["event_type"] == "function_completed"
+        and event.get("function") == "publish_book_workspace"
+    )
+    assert publication["output"]["source_document"]["artifact_ref"].endswith("/source.pdf")
+    endpoint_end = next(
+        event
+        for event in trace["events"]
+        if event["event_type"] == "function_completed"
+        and event.get("function") == "import_source_document"
+    )
+    assert endpoint_end["output"]["type"] == "JSONResponse"
+    assert endpoint_end["output"]["body"]["type"] == "bytes"
 
 
 @pytest.mark.asyncio
@@ -296,9 +367,11 @@ async def test_private_browser_surface_exposes_import_and_workspace_results(tmp_
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/html")
     assert 'id="source-document"' in response.text
+    assert 'id="source-edition-of"' in response.text
     assert 'id="import-source-document"' in response.text
     assert 'id="workspace-result"' in response.text
     assert 'fetch("/api/book-workspaces/import"' in response.text
+    assert 'headers["x-source-edition-of"]' in response.text
 
 
 @pytest.mark.asyncio
@@ -328,6 +401,87 @@ async def test_structural_scan_prefers_top_level_pdf_outline_evidence(tmp_path: 
         {
             "title": "Chapter One: Foundations",
             "physical_page_number": 1,
-            "evidence": "pdf_outline",
+            "printed_page_label": "1",
+            "evidence": {
+                "outline_title": "Chapter One: Foundations",
+                "visible_heading": "Cover material with enough native text for validation.",
+                "sources": ["pdf_outline", "visible_heading"],
+            },
         }
     ]
+    assert response.json()["workspace"]["validation"]["warnings"] == [
+        {
+            "code": "outline_visible_heading_mismatch",
+            "physical_page_number": 1,
+            "printed_page_label": "1",
+            "outline_title": "Chapter One: Foundations",
+            "visible_heading": "Cover material with enough native text for validation.",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_import_recovers_from_an_unpublished_partial_workspace(tmp_path: Path) -> None:
+    """Verify that interrupted publication cannot permanently corrupt later imports.
+
+    Inputs:
+        tmp_path: Pytest-owned isolated storage directory.
+    Functionality:
+        Simulates an interrupted write before workspace publication, then retries via HTTP.
+    Outputs:
+        None; the test passes when retry publishes a complete, reopenable workspace.
+    Failures:
+        Fails when a partial directory causes a crash or remains the visible result.
+    """
+    pdf = make_native_text_pdf("Recoverable Chapter", "A durable retry preserves evidence.")
+    source_hash = hashlib.sha256(pdf).hexdigest()
+    partial_root = tmp_path / "book-workspaces" / source_hash
+    partial_root.mkdir(parents=True)
+    (partial_root / "source.pdf").write_bytes(pdf)
+    app = create_app(data_root=tmp_path)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        recovered = await client.post(
+            "/api/book-workspaces/import",
+            content=pdf,
+            headers={"content-type": "application/pdf", "x-source-filename": "recovered.pdf"},
+        )
+        reopened = await client.post(
+            "/api/book-workspaces/import",
+            content=pdf,
+            headers={"content-type": "application/pdf", "x-source-filename": "again.pdf"},
+        )
+
+    assert recovered.status_code == 201
+    assert recovered.json()["workspace"]["validation"]["outcome"] == "accepted"
+    assert reopened.status_code == 200
+    assert reopened.json()["reopened"] is True
+
+
+@pytest.mark.asyncio
+async def test_blank_divider_pages_do_not_make_a_native_text_book_scan_heavy(
+    tmp_path: Path,
+) -> None:
+    """Verify that intentional blank pages are excluded from scan-heavy classification.
+
+    Inputs:
+        tmp_path: Pytest-owned isolated storage directory.
+    Functionality:
+        Imports a mostly textual PDF with blank dividers through the public HTTP API.
+    Outputs:
+        None; the test passes when native content is accepted with the full page count.
+    Failures:
+        Fails when blank pages are treated as raster scans or substantive omissions.
+    """
+    app = create_app(data_root=tmp_path)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/api/book-workspaces/import",
+            content=make_native_text_pdf_with_blank_dividers(),
+            headers={"content-type": "application/pdf", "x-source-filename": "dividers.pdf"},
+        )
+
+    assert response.status_code == 201
+    assert response.json()["workspace"]["source_document"]["page_count"] == 11
+    assert response.json()["workspace"]["validation"]["outcome"] == "accepted"

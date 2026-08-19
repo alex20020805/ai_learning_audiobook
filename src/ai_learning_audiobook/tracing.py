@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
 
+from starlette.responses import Response
+
 JsonValue = None | bool | int | float | str | list["JsonValue"] | dict[str, "JsonValue"]
 _active_run: ContextVar[TraceRun | None] = ContextVar("active_trace_run", default=None)
 _active_span_id: ContextVar[str | None] = ContextVar("active_trace_span_id", default=None)
@@ -80,6 +82,12 @@ def trace_value(value: object, *, key: str | None = None, depth: int = 0) -> Jso
         return {"type": "redacted", "value": "[REDACTED]"}
     if value is None or isinstance(value, (bool, int, float)):
         return value
+    if isinstance(value, Response):
+        return {
+            "type": type(value).__name__,
+            "status_code": value.status_code,
+            "body": trace_value(value.body, depth=depth + 1),
+        }
     if isinstance(value, bytes):
         return {
             "type": "bytes",
@@ -211,6 +219,25 @@ class TraceRun:
             yield
         finally:
             _active_run.reset(token)
+
+    @contextlib.contextmanager
+    def correlate_children(self, parent_span_id: str) -> Iterator[None]:
+        """Assign a causal parent to nested trace events.
+
+        Inputs:
+            parent_span_id: Active function span that owns subsequent nested work.
+        Functionality:
+            Installs the parent span context for child functions and restores it on exit.
+        Outputs:
+            A context manager yielding no value.
+        Failures:
+            Propagates exceptions from the protected application work.
+        """
+        token = _active_span_id.set(parent_span_id)
+        try:
+            yield
+        finally:
+            _active_span_id.reset(token)
 
 
 def current_run() -> TraceRun:
