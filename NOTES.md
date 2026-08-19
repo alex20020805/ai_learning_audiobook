@@ -1,36 +1,44 @@
 # Notes
 
-- The user listens while walking or commuting and prefers 15–25 minute sessions.
+- The user listens while walking or commuting and prefers 15–25 minute sessions by default.
 - Initial examples include AI engineering books, *The Pragmatic Programmer*, and other technical nonfiction.
 - Cloud processing and paid model or speech APIs are acceptable; playback must work offline on iPhone.
 - The first specification ends at faithful PDF-chapter-to-audio conversion.
 - Adaptive review should be designed later as a separate learning system that may read and write Obsidian state.
 - The current Teach skill is inspiration, not a product dependency; some of its questioning assumptions may need reconsideration before reuse.
 - The first implementation may narrate prose verbatim; the target Faithful Track lightly adapts prose for listening without substantive omission.
-- Long chapters become multiple 15–25 minute Episodes rather than being compressed.
+- Long chapters become multiple duration-bounded Episodes rather than being compressed.
 - The Faithful Track never adds outside explanations. A future Guided Track may add clearly labeled and independently cited explanations or examples informed by Obsidian.
 - Code, tables, equations, figures, and screenshots should be narrated for purpose and important details with source references; uncertainty must be disclosed.
 - Chapter detection is automatic but boundaries remain user-correctable.
 - Each Audio Lesson includes a transcript with page references and a Transformation Report.
 - Initial use is private and limited to lawfully possessed PDFs; public sharing and commercial distribution are excluded.
-- The product surface is a private web application. MVP delivery is a directly downloadable MP3 or M4A suitable for offline iPhone playback.
+- The product surface is a private Mac web application. The complete result remains there; the M4A is copied to an iCloud Drive output folder for iPhone access.
 - The MVP accepts native-text PDFs and rejects scan-heavy documents rather than performing OCR.
 - Users confirm detected chapter boundaries; transcript review is optional unless extraction warnings require intervention.
 - The pilot generates on demand and may process asynchronously without a strict latency target.
 - The longer-term vision retains and indexes an entire book once, then allocates it across a 30- or 60-day Learning Plan instead of requiring repeated manual PDF splitting.
-- The system calculates plan length from estimated narration duration rather than forcing a user-selected day count.
+- The system calculates a provisional plan length from estimated narration duration. It expresses length as Listening Sessions rather than calendar days.
 - Generation is progress-gated: no next Episode is generated until the learner completes the current quiz or check-in. There is no rolling synthesis buffer.
 - Clarification questions and quiz performance are Learner Evidence that may influence later Guided Track content.
 - The active plan retains the original PDF, Source Index, and generated outputs. Retrieval must use an explicit memory hierarchy and relevance budget rather than loading the whole history into a model context.
 - Pilot safety ceilings are US$1 per Episode and US$25 per book, with explicit confirmation required for an override.
 - Pilot evaluation uses three structurally different selections from the user's copy of *AI Engineering* by Chip Huyen.
 - Compare hosted proprietary and local/open models for applicable text-generation steps. The available local candidate is `qwen3.5-9b-local` served by llama.cpp.
-- The Episode packing target is 20 minutes within a permitted 15–25 minute range.
+- The Episode packing default is 15–25 minutes with a 20-minute midpoint target. Per Book workspace, the user may choose `5 <= minimum < maximum <= 30` when `5 <= maximum - minimum <= 10`; the midpoint becomes the target.
+- If faithful hierarchy-aware packing leaves a short semantic tail, the system shows the revised duration, plan length, and cost and requires explicit per-Episode approval. Episodes above 30 minutes remain blocked for source-structure review.
 - When a full quiz is impractical, a shorter verbal check-in may satisfy the Progress Gate.
 - The agreed Learner Memory hierarchy separates immutable source, produced artifacts, recent context, Learner Evidence, a compact concept-level Learner Model, and the bounded retrieval set for the next lesson.
 - Model routing is stage-specific. The user will manually inspect evaluation results, and the system should prefer one hosted candidate rather than paying to compare several hosted models.
 - Prefer existing ChatGPT/Codex access for pilot text-generation work where supported; separately billed API usage should be minimized.
-- The pilot is local-first: a private browser UI connects to a Local Orchestrator on the user's Mac, with iPhone access limited to an authorized network path.
+- The pilot is local-first: a private browser UI connects to a Local Orchestrator on the user's Mac. A native or web iPhone application is unnecessary for the pilot.
+- A persistent Book workspace is keyed by Source Document content hash. Identical imports reopen the existing workspace; changed bytes create a new immutable Source Document edition.
+- Import uses a fast structural scan for chapter detection and a provisional Learning Plan, then detailed extraction for confirmed generation spans.
+- Document Processing Jobs and Episode Generation Jobs have separate lifecycles. Each Episode has an independent job; only one job runs at a time through a visible FIFO queue with durable stage checkpoints.
+- Warning severity is `blocking`, `review_required`, or `informational`. Clean jobs run automatically; fidelity-compromising conditions cannot be approved away.
+- The full result in the Mac application includes audio, transcript with page references, Transformation Report, validation, provider provenance, cost, and delivery status.
+- Copying an M4A to iCloud Drive records delivery but does not prove that the iPhone retained it offline; offline retention remains a Files/iCloud setting.
+- In the pilot, successful delivery automatically completes the Listening Session and unlocks, but does not start, the next Episode. The future Learning System requires a typed check-in or quiz before the next Episode can be created.
 - If Codex subscription access is unavailable or rate-limited, ask before using separately billed API credit.
 - Evaluate one hosted TTS engine against one local speech engine independently from Hosted-versus-Local text-model evaluation.
 - The fallback check-in is typed, not spoken.
