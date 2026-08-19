@@ -14,4 +14,3 @@
 - [ ] In-app status and optional macOS notifications cover review, paid approval, failure, readiness, and delivery without leaking source content or credentials.
 - [ ] HTTP-boundary tests prove successful and failed delivery, idempotent retry, retained-result integrity, and the next-session unlock rule using an isolated destination.
 - [ ] Delivery, notification, and result-inspection functions and callbacks satisfy the traceability and human-oriented documentation contracts.
-

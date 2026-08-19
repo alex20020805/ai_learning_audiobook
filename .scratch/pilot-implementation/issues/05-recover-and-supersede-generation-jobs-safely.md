@@ -14,4 +14,3 @@
 - [ ] HTTP-boundary tests prove cancellation during each durable stage, compatible retry, incompatible retry, queued-job staleness, and running-job supersession.
 - [ ] Traces identify the exact compatibility decision and before/after state without duplicating large source or binary values.
 - [ ] Every named function and callback involved in queueing, checkpointing, cancellation, retry, and supersession satisfies the documentation contract.
-

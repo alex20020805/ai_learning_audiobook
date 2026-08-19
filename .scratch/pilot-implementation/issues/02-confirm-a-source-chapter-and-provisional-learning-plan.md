@@ -14,4 +14,3 @@
 - [ ] Packing preserves atomic semantic units, contiguous source coverage, hierarchy-aware boundaries, and explicit provisional cuts; a remaining short tail shows its pages, reason, revised plan length, and revised cost before approval.
 - [ ] HTTP-boundary tests prove span correction, extraction scoping, valid and invalid duration policies, coherent packing, short-tail approval, and blocked overlong behavior.
 - [ ] Traces and function documentation satisfy the spec's run correlation, bounded input/output representation, redaction, and human-oriented contract requirements.
-

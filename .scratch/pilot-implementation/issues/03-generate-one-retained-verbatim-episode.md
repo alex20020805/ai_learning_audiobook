@@ -14,4 +14,3 @@
 - [ ] The complete ready result remains in the Book Workspace and can be inspected through the private application.
 - [ ] An HTTP-boundary test exercises the entire happy path from confirmed span to retained Episode and asserts externally visible state and artifacts rather than private call order.
 - [ ] Traces make every stage, application function, input, output, artifact, and validation reconstructable while applying bounded previews and secret redaction; all named functions satisfy the documentation contract.
-

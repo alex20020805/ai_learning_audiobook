@@ -14,4 +14,3 @@
 - [ ] HTTP-boundary tests prove blocking, review, correction, rerun, safe approval, cancellation, and automatic clean-path behavior with deterministic fixtures.
 - [ ] Each warning, learner decision, affected artifact, and resumed transition is connected to the original run and job in structured traces.
 - [ ] Every named function and callback involved in review and resumption satisfies the required human-oriented documentation contract.
-

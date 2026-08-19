@@ -14,4 +14,3 @@
 - [ ] Speech is rendered from the approved script in shared sentence/paragraph chunks, assembled from 24 kHz WAV with source-aware offsets, and encoded as AAC-LC/M4A.
 - [ ] Deterministic contract tests cover every adapter without network access; real-provider evaluation runs only through an explicit operator action and never as part of the ordinary automated suite.
 - [ ] Provider requests and responses are traceable using bounded previews, hashes, artifact references, and credential redaction; every named adapter function and callback satisfies the documentation contract.
-
