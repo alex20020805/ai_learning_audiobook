@@ -465,7 +465,17 @@ def extract_source_index(
                     median_font_size=float(block["median_font_size"]),
                 )
                 node_warnings: list[dict[str, str]] = []
-                if any(marker in raw_text for marker in ("�", "Â", "Ã")):
+                if "�" in raw_text:
+                    node_warnings.append(
+                        {
+                            "code": "unreadable_replacement_character",
+                            "severity": "blocking",
+                            "message": (
+                                "Extracted text contains an unreadable replacement character."
+                            ),
+                        }
+                    )
+                elif any(marker in raw_text for marker in ("Â", "Ã")):
                     node_warnings.append(
                         {
                             "code": "suspected_text_corruption",

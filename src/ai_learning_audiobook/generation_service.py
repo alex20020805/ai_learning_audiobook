@@ -8,10 +8,11 @@ import json
 import math
 import struct
 import wave
+from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from ai_learning_audiobook.planning_service import (
     atomic_write_json,
@@ -41,6 +42,7 @@ JOB_LIFECYCLE = (
     "validating",
     "ready",
 )
+REVIEW_JOB_STATUSES = {"awaiting_extraction_review", "blocked_extraction"}
 
 
 class GenerationRejected(Exception):
@@ -258,6 +260,252 @@ def validate_session_source_coverage(source_index: dict[str, Any], session: dict
 
 
 @traced
+def bounded_source_evidence(value: str) -> dict[str, Any]:
+    """Represent extracted source in a review without duplicating a large book span.
+
+    Inputs:
+        value: Exact extracted source text associated with one warning.
+    Functionality:
+        Preserves character count and digest plus bounded beginning and ending text.
+    Outputs:
+        JSON-compatible source evidence mapping.
+    Failures:
+        Does not raise for valid Python strings.
+    """
+    return {
+        "character_count": len(value),
+        "sha256": hashlib.sha256(value.encode("utf-8")).hexdigest(),
+        "beginning": value[:180],
+        "ending": value[-180:] if len(value) > 180 else value,
+    }
+
+
+@traced
+def collect_session_warnings(
+    source_index: dict[str, Any], session: dict[str, Any], pins: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Build complete, version-pinned review records for session extraction warnings.
+
+    Inputs:
+        source_index: Immutable typed extraction artifact.
+        session: Planned source-node sequence and page span.
+        pins: Generation compatibility inputs that decisions must match exactly.
+    Functionality:
+        Filters index warnings to the session, enriches them with page/source/evidence/impact,
+        assigns safe permitted actions, and creates stable warning identities.
+    Outputs:
+        Ordered warning records classified as blocking, review_required, or informational.
+    Failures:
+        Raises GenerationRejected when a retained warning uses an unknown severity.
+    """
+    session_ids = set(cast(list[str], session["node_ids"]))
+    start_page = int(session["start_physical_page"])
+    end_page = int(session["end_physical_page"])
+    nodes = {
+        str(node["node_id"]): node for node in cast(list[dict[str, Any]], source_index["nodes"])
+    }
+    raw_warnings = [
+        warning
+        for warning in cast(list[dict[str, Any]], source_index.get("warnings", []))
+        if (
+            str(warning.get("node_id", "")) in session_ids
+            or start_page <= int(warning.get("physical_page_number", 0)) <= end_page
+        )
+    ]
+    records: list[dict[str, Any]] = []
+    for raw in raw_warnings:
+        severity = str(raw.get("severity", ""))
+        if severity not in {"blocking", "review_required", "informational"}:
+            raise GenerationRejected(
+                "invalid_warning_severity",
+                "A retained extraction warning has an unsupported severity.",
+                status_code=409,
+                details={"severity": severity},
+            )
+        node_id = str(raw.get("node_id", ""))
+        node = nodes.get(node_id)
+        extracted_text = str(node.get("raw_text", "")) if node else ""
+        safe_approval = str(raw.get("code")) in {
+            "unverified_non_prose_spoken_handling",
+            "page_furniture_candidate",
+        }
+        if severity == "blocking":
+            permitted_actions = ["correct", "rerun", "cancel"]
+            impact = (
+                "Scripting and Speech Synthesis are blocked until source evidence is corrected."
+            )
+        elif severity == "review_required":
+            permitted_actions = ["correct", "rerun", "cancel"]
+            if safe_approval:
+                permitted_actions.insert(0, "approve")
+            impact = "Generation pauses before scripting until a safe interpretation is recorded."
+        else:
+            permitted_actions = []
+            impact = "Generation continues; this evidence remains visible in the final Episode."
+        identity = {
+            "source_index_sha256": source_index["sha256"],
+            "session_node_ids_sha256": pins["session_node_ids_sha256"],
+            "code": raw.get("code"),
+            "severity": severity,
+            "node_id": node_id or None,
+            "physical_page_number": raw.get("physical_page_number"),
+            "extracted_source_sha256": hashlib.sha256(extracted_text.encode("utf-8")).hexdigest(),
+        }
+        records.append(
+            {
+                "warning_id": stable_json_hash(identity),
+                "code": raw.get("code"),
+                "severity": severity,
+                "message": raw.get("message", "Extraction needs review."),
+                "affected_pages": [
+                    {
+                        "physical_page_number": raw.get("physical_page_number"),
+                        "printed_page_label": raw.get("printed_page_label"),
+                    }
+                ],
+                "node_id": node_id or None,
+                "extracted_source": bounded_source_evidence(extracted_text),
+                "evidence": {
+                    "warning": raw,
+                    "node_type": node.get("type") if node else None,
+                    "geometry": node.get("geometry") if node else None,
+                    "extraction": node.get("evidence") if node else None,
+                },
+                "proposed_handling": (
+                    "Retain the normalized source text verbatim."
+                    if safe_approval
+                    else "Correct the exact extracted source or rerun deterministic extraction."
+                ),
+                "expected_impact": impact,
+                "approval_allowed": safe_approval and severity == "review_required",
+                "permitted_actions": permitted_actions,
+                "input_versions": {
+                    "source_index_sha256": pins["source_index_sha256"],
+                    "session_node_ids_sha256": pins["session_node_ids_sha256"],
+                    "prompt_version": pins["prompt_version"],
+                    "schema_version": pins["schema_version"],
+                    "provider_policy_version": pins["provider_policy_version"],
+                },
+            }
+        )
+    return records
+
+
+@traced
+def read_warning_decisions(data_root: Path, workspace_id: str) -> list[dict[str, Any]]:
+    """Read immutable extraction-warning decisions for one Book Workspace.
+
+    Inputs:
+        data_root: Application data root.
+        workspace_id: Exact immutable Book Workspace identity.
+    Functionality:
+        Loads decision artifacts in stable filename order without mutating prior decisions.
+    Outputs:
+        Ordered list of learner decision mappings.
+    Failures:
+        Propagates filesystem or JSON errors for corrupt decision artifacts.
+    """
+    decisions_root = data_root / "book-workspaces" / workspace_id / "warning-decisions"
+    return [
+        cast(dict[str, Any], json.loads(path.read_text(encoding="utf-8")))
+        for path in sorted(decisions_root.glob("*.json"))
+        if path.is_file()
+    ]
+
+
+@traced
+def match_warning_resolutions(
+    warnings: list[dict[str, Any]], decisions: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Separate exact-version resolved warnings from warnings that still require action.
+
+    Inputs:
+        warnings: Current enriched session warning records.
+        decisions: Retained immutable learner decisions from prior review runs.
+    Functionality:
+        Accepts only approve/correct decisions whose warning identity and complete input-version
+        mapping exactly match the current warning.
+    Outputs:
+        Tuple of unresolved warnings and matched decision mappings.
+    Failures:
+        Does not raise for schema-compatible warning and decision lists.
+    """
+    matched: list[dict[str, Any]] = []
+    unresolved: list[dict[str, Any]] = []
+    for warning in warnings:
+        decision = next(
+            (
+                candidate
+                for candidate in reversed(decisions)
+                if candidate.get("warning_id") == warning["warning_id"]
+                and candidate.get("input_versions") == warning["input_versions"]
+                and candidate.get("action") in {"approve", "correct"}
+            ),
+            None,
+        )
+        if decision is None and warning["severity"] != "informational":
+            unresolved.append(warning)
+        elif decision is not None:
+            matched.append(decision)
+    return unresolved, matched
+
+
+@traced
+def apply_warning_corrections(
+    source_index: dict[str, Any], decisions: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Apply exact learner corrections as a derived overlay without mutating extraction.
+
+    Inputs:
+        source_index: Immutable original Source Index mapping.
+        decisions: Exact-version approve or correct decisions matched to current warnings.
+    Functionality:
+        Deep-copies extraction evidence, replaces only explicitly corrected normalized node
+        text, records the correction operation, and derives a new effective source hash.
+    Outputs:
+        Effective Source Index mapping used for scripting and validation.
+    Failures:
+        Raises GenerationRejected if a correction lacks text or its target node is absent.
+    """
+    effective = deepcopy(source_index)
+    nodes = {str(node["node_id"]): node for node in cast(list[dict[str, Any]], effective["nodes"])}
+    for decision in decisions:
+        if decision.get("action") != "correct":
+            continue
+        node_id = str(decision.get("node_id", ""))
+        corrected_text = str(decision.get("correction_text", "")).strip()
+        if not corrected_text or node_id not in nodes:
+            raise GenerationRejected(
+                "invalid_warning_correction",
+                "A warning correction must target one existing node with non-empty text.",
+                status_code=409,
+            )
+        node = nodes[node_id]
+        node["normalized_text"] = corrected_text
+        cast(list[dict[str, Any]], node["normalization_operations"]).append(
+            {
+                "operation": "learner_evidence_correction",
+                "reason": f"warning decision {decision['decision_id']}",
+            }
+        )
+        node["word_count"] = len(corrected_text.split())
+        node["estimated_minutes"] = int(node["word_count"]) / 150
+        node["sha256"] = stable_json_hash(
+            {key: value for key, value in node.items() if key != "sha256"}
+        )
+    effective["original_source_index_sha256"] = source_index["sha256"]
+    effective["warning_resolution_sha256"] = stable_json_hash(decisions)
+    effective["sha256"] = stable_json_hash(
+        {
+            "original_source_index_sha256": source_index["sha256"],
+            "warning_resolution_sha256": effective["warning_resolution_sha256"],
+            "node_hashes": [node["sha256"] for node in effective["nodes"]],
+        }
+    )
+    return effective
+
+
+@traced
 def read_generation_queue(data_root: Path) -> dict[str, Any]:
     """Read the one durable FIFO queue shared by all Book Workspaces.
 
@@ -425,6 +673,386 @@ def transition_job(
         from_status=current,
         to_status=status,
     )
+
+
+@traced
+def interrupt_job(
+    data_root: Path,
+    queue: dict[str, Any],
+    job: dict[str, Any],
+    job_path: Path,
+    status: str,
+    *,
+    reason: str,
+) -> None:
+    """Persist a non-normal review or decision transition without advancing generation.
+
+    Inputs:
+        data_root: Application data root.
+        queue: Mutable durable FIFO mapping.
+        job: Mutable Generation Job mapping.
+        job_path: Durable path to the job artifact.
+        status: Interruption state such as blocked, awaiting review, cancelled, or resolved.
+        reason: Human-readable reason retained with the transition.
+    Functionality:
+        Updates job and queue together, records causal transition evidence, and leaves the job
+        outside the active generation set so no Speech Synthesis can occur while paused.
+    Outputs:
+        None; mutates and atomically persists the supplied job and queue.
+    Failures:
+        Propagates missing queue-entry, filesystem, JSON, or trace errors.
+    """
+    current = str(job["status"])
+    timestamp = utc_now()
+    job["status"] = status
+    job["updated_at"] = timestamp
+    cast(list[dict[str, str]], job["transitions"]).append(
+        {
+            "from": current,
+            "to": status,
+            "at": timestamp,
+            "run_id": current_run().run_id,
+            "reason": reason,
+        }
+    )
+    entry = next(
+        item
+        for item in cast(list[dict[str, Any]], queue["entries"])
+        if item["job_id"] == job["job_id"]
+    )
+    entry["status"] = status
+    entry["updated_at"] = timestamp
+    persist_json_artifact(
+        job_path, job, media_type="application/vnd.ai-learning.generation-job+json"
+    )
+    persist_queue(data_root, queue)
+    current_run().record(
+        "job_stage_transition",
+        job_id=job["job_id"],
+        episode_id=job["episode_id"],
+        from_status=current,
+        to_status=status,
+        reason=reason,
+    )
+
+
+@traced
+def create_warning_review_job(
+    data_root: Path,
+    workspace_id: str,
+    plan_id: str,
+    session: dict[str, Any],
+    episode_id: str,
+    queue: dict[str, Any],
+    pins: dict[str, Any],
+    warnings: list[dict[str, Any]],
+    *,
+    review_parent_job_id: str | None,
+) -> dict[str, Any]:
+    """Create and pause a versioned job before scripting for unresolved extraction warnings.
+
+    Inputs:
+        data_root: Application data root.
+        workspace_id: Immutable Book Workspace identity.
+        plan_id: Confirmed Learning Plan identity.
+        session: Selected Listening Session mapping.
+        episode_id: Stable Episode identity for the plan/session pair.
+        queue: Current shared durable FIFO mapping with no active job.
+        pins: Immutable job compatibility versions.
+        warnings: Unresolved enriched warning records requiring learner action.
+        review_parent_job_id: Optional prior paused job that caused this compatible rerun.
+    Functionality:
+        Allocates an independent job version, advances only through extraction, persists complete
+        page-level review evidence, and pauses as blocking or review-required before scripting.
+    Outputs:
+        Bounded job, review, empty Episode, and queue mappings for an HTTP 409 response.
+    Failures:
+        Propagates storage or trace failures and never creates script or audio artifacts.
+    """
+    episode_root = data_root / "book-workspaces" / workspace_id / "episodes" / episode_id
+    jobs_root = episode_root / "jobs"
+    version = len(sorted(path for path in jobs_root.glob("*/job.json") if path.is_file())) + 1
+    job_id = str(uuid4())
+    job_root = jobs_root / job_id
+    job_path = job_root / "job.json"
+    created_at = utc_now()
+    job: dict[str, Any] = {
+        "schema_version": GENERATION_SCHEMA_VERSION,
+        "job_id": job_id,
+        "episode_id": episode_id,
+        "version": version,
+        "workspace_id": workspace_id,
+        "plan_id": plan_id,
+        "session_number": session["session_number"],
+        "status": "draft",
+        "created_at": created_at,
+        "updated_at": created_at,
+        "run_id": current_run().run_id,
+        "review_parent_job_id": review_parent_job_id,
+        "pins": pins,
+        "transitions": [],
+        "artifacts": {},
+    }
+    entry = {
+        "sequence": len(cast(list[dict[str, Any]], queue["entries"])) + 1,
+        "job_id": job_id,
+        "episode_id": episode_id,
+        "workspace_id": workspace_id,
+        "status": "draft",
+        "created_at": created_at,
+        "updated_at": created_at,
+    }
+    cast(list[dict[str, Any]], queue["entries"]).append(entry)
+    persist_json_artifact(
+        job_path, job, media_type="application/vnd.ai-learning.generation-job+json"
+    )
+    persist_queue(data_root, queue)
+    for status in ("awaiting_span_confirmation", "queued", "extracting"):
+        transition_job(data_root, queue, job, job_path, status)
+    blocking = any(warning["severity"] == "blocking" for warning in warnings)
+    status = "blocked_extraction" if blocking else "awaiting_extraction_review"
+    review = {
+        "schema_version": GENERATION_SCHEMA_VERSION,
+        "job_id": job_id,
+        "status": status,
+        "warning_count": len(warnings),
+        "warnings": warnings,
+        "source_index_sha256": pins["source_index_sha256"],
+        "compatibility_sha256": pins["compatibility_sha256"],
+    }
+    review_path = job_root / "extraction-review.json"
+    evidence = persist_json_artifact(
+        review_path,
+        review,
+        media_type="application/vnd.ai-learning.extraction-review+json",
+    )
+    cast(dict[str, Any], job["artifacts"])["extraction_review"] = {
+        **evidence,
+        "artifact_ref": relative_artifact_ref(data_root, review_path),
+    }
+    interrupt_job(
+        data_root,
+        queue,
+        job,
+        job_path,
+        status,
+        reason="Unresolved extraction warning requires learner action before scripting.",
+    )
+    current_run().record(
+        "extraction_review_required",
+        job_id=job_id,
+        status=status,
+        warning_ids=[warning["warning_id"] for warning in warnings],
+    )
+    return {"episode": None, "job": job, "review": review, "queue": queue_view(queue)}
+
+
+@traced
+def locate_generation_job(
+    data_root: Path, job_id: str
+) -> tuple[dict[str, Any], dict[str, Any], Path, Path]:
+    """Resolve a generated UUID job through the durable FIFO without scanning arbitrary paths.
+
+    Inputs:
+        data_root: Application data root.
+        job_id: Exact Generation Job UUID returned by the public API.
+    Functionality:
+        Validates UUID syntax, finds the queue entry, and resolves its fixed job/review paths.
+    Outputs:
+        Tuple of queue mapping, job mapping, job path, and extraction-review path.
+    Failures:
+        Raises GenerationRejected for unsafe, missing, or incomplete job identities.
+    """
+    try:
+        canonical_job_id = str(UUID(job_id))
+    except ValueError as error:
+        raise GenerationRejected(
+            "invalid_job_id", "Generation Job identity is invalid.", status_code=404
+        ) from error
+    queue = read_generation_queue(data_root)
+    entry = next(
+        (
+            item
+            for item in cast(list[dict[str, Any]], queue["entries"])
+            if item.get("job_id") == canonical_job_id
+        ),
+        None,
+    )
+    if entry is None:
+        raise GenerationRejected("job_not_found", "Generation Job does not exist.", status_code=404)
+    job_path = (
+        data_root
+        / "book-workspaces"
+        / str(entry["workspace_id"])
+        / "episodes"
+        / str(entry["episode_id"])
+        / "jobs"
+        / canonical_job_id
+        / "job.json"
+    )
+    review_path = job_path.with_name("extraction-review.json")
+    if not job_path.is_file():
+        raise GenerationRejected(
+            "job_not_found", "Generation Job artifact is missing.", status_code=404
+        )
+    job = cast(dict[str, Any], json.loads(job_path.read_text(encoding="utf-8")))
+    return queue, job, job_path, review_path
+
+
+@traced
+def read_generation_job(data_root: Path, job_id: str) -> dict[str, Any]:
+    """Read one durable Generation Job and its extraction-review evidence.
+
+    Inputs:
+        data_root: Application data root.
+        job_id: Exact Generation Job UUID.
+    Functionality:
+        Resolves the job through the FIFO and loads its review artifact when one is retained.
+    Outputs:
+        Mapping containing job, optional review, and current shared queue evidence.
+    Failures:
+        Raises GenerationRejected for unsafe or missing jobs and propagates corrupt JSON errors.
+    """
+    queue, job, _, review_path = locate_generation_job(data_root, job_id)
+    review = (
+        cast(dict[str, Any], json.loads(review_path.read_text(encoding="utf-8")))
+        if review_path.is_file()
+        else None
+    )
+    return {"job": job, "review": review, "queue": queue_view(queue)}
+
+
+@traced
+def resolve_generation_warning(
+    data_root: Path,
+    job_id: str,
+    warning_id: str,
+    *,
+    action: str,
+    correction_text: str = "",
+) -> dict[str, Any]:
+    """Record one exact warning decision and continue, rerun, or cancel safely.
+
+    Inputs:
+        data_root: Application data root.
+        job_id: Paused Generation Job UUID.
+        warning_id: Exact warning identity from that job's review artifact.
+        action: One of approve, correct, rerun, or cancel.
+        correction_text: Required exact replacement source text for correction.
+    Functionality:
+        Validates action against severity and permitted actions, persists an immutable decision
+        tied to warning input versions, closes the paused job, and starts a causally linked job
+        for approve/correct/rerun while cancellation publishes nothing.
+    Outputs:
+        Decision plus the resulting cancelled, paused-rerun, or ready generation outcome.
+    Failures:
+        Raises GenerationRejected for stale jobs/warnings, unsafe approvals, invalid corrections,
+        unsupported actions, or missing review evidence.
+    """
+    queue, job, job_path, review_path = locate_generation_job(data_root, job_id)
+    if job.get("status") not in REVIEW_JOB_STATUSES:
+        raise GenerationRejected(
+            "job_not_awaiting_review",
+            "This Generation Job is no longer awaiting an extraction decision.",
+            status_code=409,
+        )
+    if not review_path.is_file():
+        raise GenerationRejected(
+            "review_artifact_missing", "Extraction review evidence is unavailable.", status_code=409
+        )
+    review = cast(dict[str, Any], json.loads(review_path.read_text(encoding="utf-8")))
+    warning = next(
+        (
+            item
+            for item in cast(list[dict[str, Any]], review["warnings"])
+            if item.get("warning_id") == warning_id
+        ),
+        None,
+    )
+    if warning is None:
+        raise GenerationRejected(
+            "warning_not_found", "Warning does not belong to this job.", status_code=404
+        )
+    if action not in {"approve", "correct", "rerun", "cancel"}:
+        raise GenerationRejected("invalid_warning_action", "Select a supported warning action.")
+    if action == "approve" and not warning.get("approval_allowed"):
+        raise GenerationRejected(
+            "warning_not_approvable",
+            "This warning could compromise fidelity and cannot be approved away.",
+            status_code=409,
+        )
+    if action not in cast(list[str], warning["permitted_actions"]):
+        raise GenerationRejected(
+            "warning_action_not_permitted",
+            "The selected action is not permitted for this warning severity.",
+            status_code=409,
+        )
+    if action == "correct" and (not correction_text.strip() or warning.get("node_id") is None):
+        raise GenerationRejected(
+            "invalid_warning_correction",
+            "Correction requires non-empty replacement text for the affected source node.",
+        )
+    decision_identity = {
+        "job_id": job_id,
+        "warning_id": warning_id,
+        "action": action,
+        "correction_text": correction_text.strip() if action == "correct" else "",
+        "input_versions": warning["input_versions"],
+    }
+    decision = {
+        "schema_version": GENERATION_SCHEMA_VERSION,
+        "decision_id": stable_json_hash(decision_identity),
+        **decision_identity,
+        "node_id": warning.get("node_id"),
+        "severity": warning["severity"],
+        "decided_at": utc_now(),
+        "run_id": current_run().run_id,
+    }
+    decision_path = (
+        data_root
+        / "book-workspaces"
+        / str(job["workspace_id"])
+        / "warning-decisions"
+        / f"{decision['decision_id']}.json"
+    )
+    persist_json_artifact(
+        decision_path,
+        decision,
+        media_type="application/vnd.ai-learning.warning-decision+json",
+    )
+    job.setdefault("warning_decision_ids", []).append(decision["decision_id"])
+    terminal_status = {
+        "approve": "review_resolved",
+        "correct": "review_resolved",
+        "rerun": "rerun_requested",
+        "cancel": "cancelled",
+    }[action]
+    interrupt_job(
+        data_root,
+        queue,
+        job,
+        job_path,
+        terminal_status,
+        reason=f"Learner chose {action} for warning {warning_id}.",
+    )
+    current_run().record(
+        "warning_decision_recorded",
+        job_id=job_id,
+        warning_id=warning_id,
+        decision_id=decision["decision_id"],
+        action=action,
+        input_versions=warning["input_versions"],
+    )
+    if action == "cancel":
+        return {"decision": decision, "job": job, "review": review, "queue": queue_view(queue)}
+    next_outcome = generate_episode(
+        data_root,
+        str(job["workspace_id"]),
+        plan_id=str(job["plan_id"]),
+        session_number=int(job["session_number"]),
+        review_parent_job_id=job_id,
+    )
+    return {"decision": decision, "review_parent_job": job, **next_outcome}
 
 
 @traced
@@ -761,7 +1389,12 @@ def relative_artifact_ref(data_root: Path, path: Path) -> str:
 
 @traced
 def generate_episode(
-    data_root: Path, workspace_id: str, *, plan_id: str, session_number: int
+    data_root: Path,
+    workspace_id: str,
+    *,
+    plan_id: str,
+    session_number: int,
+    review_parent_job_id: str | None = None,
 ) -> dict[str, Any]:
     """Run one complete deterministic Episode Generation Job to retained readiness.
 
@@ -770,6 +1403,7 @@ def generate_episode(
         workspace_id: Immutable Book Workspace identity.
         plan_id: Confirmed immutable Learning Plan identity.
         session_number: One-based Listening Session selected for generation.
+        review_parent_job_id: Optional paused job that led to this compatible continuation.
     Functionality:
         Creates an independent pinned job, claims the single FIFO active slot, produces and
         traces verbatim script/audio/evidence artifacts, validates all publication gates, and
@@ -800,13 +1434,35 @@ def generate_episode(
     episode_id = stable_json_hash(
         {"workspace_id": workspace_id, "plan_id": plan_id, "session_number": session_number}
     )
+    pins = build_job_pins(workspace_id, source_index, plan, session)
+    warnings = collect_session_warnings(source_index, session, pins)
+    decisions = read_warning_decisions(data_root, workspace_id)
+    unresolved_warnings, matched_decisions = match_warning_resolutions(warnings, decisions)
+    if unresolved_warnings:
+        return create_warning_review_job(
+            data_root,
+            workspace_id,
+            plan_id,
+            session,
+            episode_id,
+            queue,
+            pins,
+            unresolved_warnings,
+            review_parent_job_id=review_parent_job_id,
+        )
+    if matched_decisions:
+        source_index = apply_warning_corrections(source_index, matched_decisions)
+    pins["warning_resolution_sha256"] = stable_json_hash(matched_decisions)
+    pins["effective_source_index_sha256"] = source_index["sha256"]
+    pins["compatibility_sha256"] = stable_json_hash(
+        {key: value for key, value in pins.items() if key != "compatibility_sha256"}
+    )
     episode_root = data_root / "book-workspaces" / workspace_id / "episodes" / episode_id
     jobs_root = episode_root / "jobs"
     existing_versions = sorted(path for path in jobs_root.glob("*/job.json") if path.is_file())
     job_id = str(uuid4())
     job_root = jobs_root / job_id
     job_path = job_root / "job.json"
-    pins = build_job_pins(workspace_id, source_index, plan, session)
     created_at = utc_now()
     job: dict[str, Any] = {
         "schema_version": GENERATION_SCHEMA_VERSION,
@@ -814,10 +1470,13 @@ def generate_episode(
         "episode_id": episode_id,
         "version": len(existing_versions) + 1,
         "workspace_id": workspace_id,
+        "plan_id": plan_id,
+        "session_number": session_number,
         "status": "draft",
         "created_at": created_at,
         "updated_at": created_at,
         "run_id": current_run().run_id,
+        "review_parent_job_id": review_parent_job_id,
         "pins": pins,
         "transitions": [],
         "artifacts": {},
@@ -836,10 +1495,38 @@ def generate_episode(
         job_path, job, media_type="application/vnd.ai-learning.generation-job+json"
     )
     persist_queue(data_root, queue)
+    final_review = {
+        "schema_version": GENERATION_SCHEMA_VERSION,
+        "job_id": job_id,
+        "status": "resolved" if matched_decisions else "clean",
+        "warnings": warnings,
+        "decisions": matched_decisions,
+        "warning_resolution_sha256": pins["warning_resolution_sha256"],
+    }
+    final_review_path = job_root / "extraction-review.json"
+    final_review_evidence = persist_json_artifact(
+        final_review_path,
+        final_review,
+        media_type="application/vnd.ai-learning.extraction-review+json",
+    )
+    cast(dict[str, Any], job["artifacts"])["extraction_review"] = {
+        **final_review_evidence,
+        "artifact_ref": relative_artifact_ref(data_root, final_review_path),
+    }
     for status in ("awaiting_span_confirmation", "queued", "extracting", "scripting"):
         transition_job(data_root, queue, job, job_path, status)
 
     script, transformation_report, coverage_manifest = build_verbatim_script(source_index, session)
+    cast(list[dict[str, Any]], transformation_report["entries"]).extend(
+        {
+            "node_id": decision.get("node_id"),
+            "kind": "extraction_warning_decision",
+            "warning_id": decision["warning_id"],
+            "decision_id": decision["decision_id"],
+            "action": decision["action"],
+        }
+        for decision in matched_decisions
+    )
     artifact_values = {
         "script": (
             job_root / "script.json",
@@ -1012,6 +1699,8 @@ def generate_episode(
         "validation": validation,
         "provider_provenance": provider_provenance,
         "cost": cost_record,
+        "extraction_warnings": warnings,
+        "warning_decisions": matched_decisions,
         "trace_manifest_ref": job["trace_manifest_ref"],
         "updated_at": job["completed_at"],
     }
@@ -1090,6 +1779,7 @@ def read_retained_episode(data_root: Path, workspace_id: str, episode_id: str) -
     job_root = episode_path.parent / "jobs" / str(episode["current_job_id"])
     names = {
         "job": "job.json",
+        "extraction_review": "extraction-review.json",
         "script": "script.json",
         "transformation_report": "transformation-report.json",
         "coverage_manifest": "coverage-manifest.json",
