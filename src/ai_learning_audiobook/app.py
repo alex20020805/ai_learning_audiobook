@@ -16,8 +16,10 @@ from ai_learning_audiobook.generation_service import (
     generate_episode,
     list_retained_episodes,
     queue_view,
+    read_generation_job,
     read_generation_queue,
     read_retained_episode,
+    resolve_generation_warning,
     retained_audio_path,
 )
 from ai_learning_audiobook.import_service import (
@@ -57,6 +59,15 @@ class EpisodeGenerationRequest(BaseModel):
 
     plan_id: str
     session_number: int
+
+
+class WarningDecisionRequest(BaseModel):
+    """Strict HTTP input for one exact extraction-warning decision."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    action: str
+    correction_text: str = ""
 
 
 def create_app(data_root: Path) -> FastAPI:
@@ -383,7 +394,95 @@ def create_app(data_root: Path) -> FastAPI:
                     },
                 },
             )
-        return JSONResponse(status_code=201, content={"run_id": current_run().run_id, **outcome})
+        paused = outcome.get("episode") is None
+        return JSONResponse(
+            status_code=409 if paused else 201,
+            content={"run_id": current_run().run_id, **outcome},
+        )
+
+    @app.get("/api/generation-jobs/{job_id}")
+    @traced
+    async def get_generation_job(job_id: str) -> JSONResponse:
+        """Inspect one durable Generation Job and its extraction-review evidence.
+
+        Inputs:
+            job_id: Exact Generation Job UUID returned by generation or queue inspection.
+        Functionality:
+            Resolves the job through the shared FIFO and exposes its review and queue state.
+        Outputs:
+            JSON job evidence or a stable missing/unsafe identifier response.
+        Failures:
+            Converts GenerationRejected into its declared HTTP response and propagates
+            retained JSON corruption.
+        """
+        try:
+            outcome = read_generation_job(data_root, job_id)
+        except GenerationRejected as error:
+            return JSONResponse(
+                status_code=error.status_code,
+                content={
+                    "run_id": current_run().run_id,
+                    "error": {
+                        "code": error.code,
+                        "message": error.message,
+                        "details": error.details,
+                    },
+                },
+            )
+        return JSONResponse(content={"run_id": current_run().run_id, **outcome})
+
+    @app.post("/api/generation-jobs/{job_id}/warnings/{warning_id}/decisions")
+    @traced
+    async def decide_generation_warning(
+        job_id: str, warning_id: str, decision_request: WarningDecisionRequest
+    ) -> JSONResponse:
+        """Resolve, rerun, or cancel one exact version-pinned extraction warning.
+
+        Inputs:
+            job_id: Paused Generation Job UUID.
+            warning_id: Exact warning identity exposed by that job's review artifact.
+            decision_request: Strict action and optional replacement source text.
+        Functionality:
+            Enforces severity-specific actions, persists immutable decision evidence, and
+            continues through a causally linked job only when the outcome is safe.
+        Outputs:
+            HTTP 201 for ready continuation, 200 for cancellation, 409 for another review,
+            or a stable rejection explaining why an action is unsafe.
+        Failures:
+            Converts GenerationRejected into its declared HTTP response and propagates
+            unexpected persistence, trace, generation, or validation failures.
+        """
+        try:
+            outcome = resolve_generation_warning(
+                data_root,
+                job_id,
+                warning_id,
+                action=decision_request.action,
+                correction_text=decision_request.correction_text,
+            )
+        except GenerationRejected as error:
+            current_run().record("validation_completed", outcome="rejected", error_code=error.code)
+            return JSONResponse(
+                status_code=error.status_code,
+                content={
+                    "run_id": current_run().run_id,
+                    "error": {
+                        "code": error.code,
+                        "message": error.message,
+                        "details": error.details,
+                    },
+                },
+            )
+        if outcome.get("job", {}).get("status") == "cancelled":
+            status_code = 200
+        elif outcome.get("episode") is None:
+            status_code = 409
+        else:
+            status_code = 201
+        return JSONResponse(
+            status_code=status_code,
+            content={"run_id": current_run().run_id, **outcome},
+        )
 
     @app.get("/api/generation-queue")
     @traced

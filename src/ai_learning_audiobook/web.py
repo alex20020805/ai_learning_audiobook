@@ -93,6 +93,23 @@ PRIVATE_APPLICATION_HTML = """<!doctype html>
       <p id="generation-status" role="status" aria-live="polite"></p>
       <pre id="generation-result" aria-label="Episode Generation result">No Episode generated.</pre>
       <audio id="episode-audio" controls hidden></audio>
+      <div id="extraction-review" hidden>
+        <h3>Extraction review</h3>
+        <label for="review-warning">Warning</label>
+        <select id="review-warning"></select>
+        <pre id="review-result" aria-label="Extraction warning evidence">No warning selected.</pre>
+        <label for="review-action">Decision</label>
+        <select id="review-action">
+          <option value="approve">Approve safe handling</option>
+          <option value="correct">Correct extracted source</option>
+          <option value="rerun">Rerun extraction</option>
+          <option value="cancel">Cancel this job</option>
+        </select>
+        <label for="correction-text">Corrected source text (required for correction)</label>
+        <textarea id="correction-text" rows="3"></textarea>
+        <button id="apply-review-decision" type="button">Apply extraction decision</button>
+        <p id="review-status" role="status" aria-live="polite"></p>
+      </div>
       <h3>Durable FIFO queue</h3>
       <pre id="queue-result" aria-label="Generation queue">Queue not loaded.</pre>
       <button id="refresh-episodes" type="button">Refresh retained Episodes</button>
@@ -129,8 +146,17 @@ PRIVATE_APPLICATION_HTML = """<!doctype html>
     const refreshEpisodesButton = document.querySelector("#refresh-episodes");
     const episodeResult = document.querySelector("#episode-result");
     const episodeAudio = document.querySelector("#episode-audio");
+    const extractionReview = document.querySelector("#extraction-review");
+    const reviewWarningInput = document.querySelector("#review-warning");
+    const reviewResult = document.querySelector("#review-result");
+    const reviewActionInput = document.querySelector("#review-action");
+    const correctionTextInput = document.querySelector("#correction-text");
+    const applyReviewDecisionButton = document.querySelector("#apply-review-decision");
+    const reviewStatus = document.querySelector("#review-status");
     let activeWorkspaceId = null;
     let activePlanId = null;
+    let activeReviewJobId = null;
+    let activeReview = null;
     let chapterCatalog = [];
 
     /**
@@ -286,6 +312,10 @@ PRIVATE_APPLICATION_HTML = """<!doctype html>
           network_used: episode.provider_provenance?.network_used,
           paid_usage: episode.provider_provenance?.paid_usage,
           total_cost_usd: episode.cost?.total_usd,
+          extraction_warning_count: (episode.extraction_warnings || []).length,
+          extraction_warning_severities: (episode.extraction_warnings || [])
+            .map((warning) => warning.severity),
+          warning_decision_count: (episode.warning_decisions || []).length,
           trace_manifest_ref: episode.trace_manifest_ref
         },
         job: job.job_id ? {
@@ -294,8 +324,63 @@ PRIVATE_APPLICATION_HTML = """<!doctype html>
           status: job.status,
           compatibility_sha256: job.pins?.compatibility_sha256,
           transitions: (job.transitions || []).map((transition) => transition.to)
+        } : undefined,
+        review: payload.review ? {
+          status: payload.review.status,
+          warning_count: payload.review.warning_count,
+          warning_ids: payload.review.warnings.map((warning) => warning.warning_id),
+          severities: payload.review.warnings.map((warning) => warning.severity)
         } : undefined
       };
+    }
+
+    /**
+     * Inputs: none; reads the selected warning from the active extraction review.
+     * Functionality: displays bounded page/source/evidence/handling/impact/action details and
+     * disables approval whenever the exact warning is not safely approvable.
+     * Outputs: undefined after synchronously updating review controls.
+     * Failures: returns without mutation when no active review or warning exists.
+     */
+    function renderReviewWarning() {
+      if (!activeReview) return;
+      const warning = activeReview.warnings.find(
+        (item) => item.warning_id === reviewWarningInput.value
+      );
+      if (!warning) return;
+      reviewResult.textContent = JSON.stringify(warning, null, 2);
+      for (const option of reviewActionInput.options) {
+        option.disabled = !warning.permitted_actions.includes(option.value);
+      }
+      reviewActionInput.value = warning.permitted_actions[0] || "cancel";
+      correctionTextInput.value = "";
+    }
+
+    /**
+     * Inputs: review, complete bounded extraction-review evidence; job, its paused job mapping.
+     * Functionality: restores job identity, warning choices, severity-safe actions, and the
+     * review panel so decisions survive page reloads.
+     * Outputs: undefined after synchronously displaying the selected warning.
+     * Failures: hides the panel when review evidence or job identity is unavailable.
+     */
+    function showExtractionReview(review, job) {
+      if (!review || !job?.job_id || !review.warnings?.length) {
+        extractionReview.hidden = true;
+        activeReview = null;
+        activeReviewJobId = null;
+        return;
+      }
+      activeReview = review;
+      activeReviewJobId = job.job_id;
+      reviewWarningInput.replaceChildren();
+      for (const warning of review.warnings) {
+        reviewWarningInput.append(new Option(
+          `${warning.severity}: ${warning.code} — page `
+            + `${warning.affected_pages[0]?.physical_page_number ?? "unknown"}`,
+          warning.warning_id
+        ));
+      }
+      extractionReview.hidden = false;
+      renderReviewWarning();
     }
 
     /**
@@ -343,6 +428,7 @@ PRIVATE_APPLICATION_HTML = """<!doctype html>
       }
       await refreshGenerationQueue();
       await refreshRetainedEpisodes();
+      await restorePendingReview();
     }
 
     /**
@@ -356,6 +442,30 @@ PRIVATE_APPLICATION_HTML = """<!doctype html>
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.error.message);
       queueResult.textContent = JSON.stringify(payload.queue, null, 2);
+    }
+
+    /**
+     * Inputs: none; reads the already rendered FIFO queue and public job inspection endpoint.
+     * Functionality: finds the newest paused extraction job for the active workspace and
+     * restores its exact review evidence after reload without inventing browser-side state.
+     * Outputs: Promise<void> after a pending panel is restored or hidden when none exists.
+     * Failures: rejects when public job inspection fails or returns invalid JSON.
+     */
+    async function restorePendingReview() {
+      if (!activeWorkspaceId) return;
+      const queue = JSON.parse(queueResult.textContent);
+      const paused = [...queue.entries].reverse().find((entry) =>
+        entry.workspace_id === activeWorkspaceId
+        && ["awaiting_extraction_review", "blocked_extraction"].includes(entry.status)
+      );
+      if (!paused) {
+        showExtractionReview(null, null);
+        return;
+      }
+      const response = await fetch(`/api/generation-jobs/${paused.job_id}`);
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error.message);
+      showExtractionReview(payload.review, payload.job);
     }
 
     /**
@@ -405,15 +515,70 @@ PRIVATE_APPLICATION_HTML = """<!doctype html>
         });
         const payload = await response.json();
         generationResult.textContent = JSON.stringify(summarizeEpisodePayload(payload), null, 2);
-        generationStatus.textContent = response.ok
-          ? "Deterministic Episode is ready and retained locally."
-          : payload.error.message;
+        if (payload.review) {
+          showExtractionReview(payload.review, payload.job);
+          generationStatus.textContent = payload.review.status === "blocked_extraction"
+            ? "Blocking extraction evidence must be corrected or rerun before scripting."
+            : "Review extraction evidence before scripting.";
+        } else {
+          showExtractionReview(null, null);
+          generationStatus.textContent = response.ok
+            ? "Deterministic Episode is ready and retained locally."
+            : payload.error.message;
+        }
         await refreshGenerationQueue();
         await refreshRetainedEpisodes();
       } catch (error) {
         generationStatus.textContent = `Generation failed: ${error.message}`;
       } finally {
         generateEpisodeButton.disabled = false;
+      }
+    }
+
+    /**
+     * Inputs: none; reads the active paused job, warning, action, and optional correction text.
+     * Functionality: submits one exact-version decision, displays a linked continuation or
+     * cancellation, and refreshes queue/Episode/audio evidence.
+     * Outputs: Promise<void> after the decision outcome is rendered.
+     * Failures: catches transport/JSON failures, reports them, and re-enables the decision button.
+     */
+    async function submitReviewDecision() {
+      if (!activeReviewJobId || !reviewWarningInput.value) return;
+      applyReviewDecisionButton.disabled = true;
+      reviewStatus.textContent = "Recording exact-version extraction decision…";
+      try {
+        const response = await fetch(
+          `/api/generation-jobs/${activeReviewJobId}/warnings/`
+            + `${reviewWarningInput.value}/decisions`,
+          {
+            method: "POST",
+            headers: {"content-type": "application/json"},
+            body: JSON.stringify({
+              action: reviewActionInput.value,
+              correction_text: correctionTextInput.value
+            })
+          }
+        );
+        const payload = await response.json();
+        if (payload.error) {
+          reviewStatus.textContent = payload.error.message;
+        } else if (payload.review && payload.episode === null) {
+          showExtractionReview(payload.review, payload.job);
+          reviewStatus.textContent = "Rerun still requires extraction review.";
+        } else if (payload.job?.status === "cancelled") {
+          showExtractionReview(null, null);
+          reviewStatus.textContent = "Generation Job cancelled; no Episode was published.";
+        } else {
+          showExtractionReview(null, null);
+          generationResult.textContent = JSON.stringify(summarizeEpisodePayload(payload), null, 2);
+          reviewStatus.textContent = "Decision recorded; the linked Episode is ready.";
+        }
+        await refreshGenerationQueue();
+        await refreshRetainedEpisodes();
+      } catch (error) {
+        reviewStatus.textContent = `Review decision failed: ${error.message}`;
+      } finally {
+        applyReviewDecisionButton.disabled = false;
       }
     }
 
@@ -512,6 +677,8 @@ PRIVATE_APPLICATION_HTML = """<!doctype html>
     confirmChapterButton.addEventListener("click", submitChapterPlan);
     inspectWorkspaceButton.addEventListener("click", inspectRetainedWorkspace);
     generateEpisodeButton.addEventListener("click", submitEpisodeGeneration);
+    reviewWarningInput.addEventListener("change", renderReviewWarning);
+    applyReviewDecisionButton.addEventListener("click", submitReviewDecision);
     refreshEpisodesButton.addEventListener("click", refreshGenerationView);
 
     refreshWorkspaces().catch((error) => {

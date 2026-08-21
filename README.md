@@ -1,10 +1,12 @@
 # AI Learning Audiobook
 
-Tickets 01–03 provide a private, local-first browser surface and Local Orchestrator for
+Tickets 01–04 provide a private, local-first browser surface and Local Orchestrator for
 importing a native-text PDF into an immutable, content-addressed Book Workspace, confirming
 a chapter span, creating a provenance-preserving Source Index, and packing a provisional
 Learning Plan. A confirmed Listening Session can then run through a retained, versioned,
-verbatim Episode Generation Job with deterministic no-network test audio.
+verbatim Episode Generation Job with deterministic no-network test audio. Extraction warnings
+pause before scripting when human evidence review is required, and immutable decisions can
+correct, rerun, safely approve, or cancel the exact affected input version.
 
 ## Run locally
 
@@ -27,6 +29,9 @@ The implemented API is:
   Listening Session packing;
 - `GET /api/book-workspaces/{workspace_id}/planning` for retained policy and plan history;
 - `POST /api/book-workspaces/{workspace_id}/episodes` for the deterministic verbatim pipeline;
+- `GET /api/generation-jobs/{job_id}` for a retained job and its extraction-review evidence;
+- `POST /api/generation-jobs/{job_id}/warnings/{warning_id}/decisions` for an exact-version
+  correction, rerun, safe approval, or cancellation decision;
 - `GET /api/generation-queue` for the single durable FIFO and active-job evidence;
 - `GET /api/book-workspaces/{workspace_id}/episodes` for retained ready Episodes;
 - `GET /api/book-workspaces/{workspace_id}/episodes/{episode_id}` for complete structured
@@ -62,5 +67,10 @@ normalized source verbatim, renders short 24 kHz tone-marker WAV chunks, assembl
 and records zero network/paid use. The tone markers are intentionally not production narration.
 Only a complete Episode that passes source coverage, page-reference, audio, provenance, cost,
 and trace gates is published as `ready`.
+
+Warnings are classified as `blocking`, `review_required`, or `informational`. Blocking
+conditions cannot be approved and never reach scripting or speech. Review-required jobs show
+bounded page evidence and permitted actions, while informational warnings remain visible in the
+published Episode evidence without interrupting a clean run.
 
 The learner-authorized book fixture belongs under `test-data/private/`, which is ignored by Git. Do not publish or redistribute it.
