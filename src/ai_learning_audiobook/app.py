@@ -8,6 +8,7 @@ from typing import Annotated
 
 from fastapi import Body, FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
+from pydantic import BaseModel, ConfigDict
 from starlette.responses import Response
 
 from ai_learning_audiobook.import_service import (
@@ -15,8 +16,29 @@ from ai_learning_audiobook.import_service import (
     import_source_document_content,
     list_published_book_workspaces,
 )
+from ai_learning_audiobook.planning_service import (
+    PlanningRejected,
+    confirm_chapter_plan,
+    inspect_chapter_catalog,
+    read_planning_state,
+)
 from ai_learning_audiobook.tracing import TraceRun, current_run, read_trace, traced
 from ai_learning_audiobook.web import PRIVATE_APPLICATION_HTML
+
+
+class ChapterPlanRequest(BaseModel):
+    """Strict HTTP input for one confirmed Source Chapter planning request."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    heading_index: int
+    start_physical_page: int
+    end_physical_page: int
+    minimum_minutes: float = 15.0
+    maximum_minutes: float = 25.0
+    allow_cross_chapter: bool = False
+    approve_short_tail: bool = False
+    boundary_note: str = ""
 
 
 def create_app(data_root: Path) -> FastAPI:
@@ -188,6 +210,121 @@ def create_app(data_root: Path) -> FastAPI:
             Propagates filesystem or JSON errors if retained application data is corrupt.
         """
         return JSONResponse(content={"workspaces": list_published_book_workspaces(data_root)})
+
+    @app.get("/api/book-workspaces/{workspace_id}/chapters")
+    @traced
+    async def get_chapter_catalog(workspace_id: str) -> JSONResponse:
+        """Inspect detected chapter boundaries and adjacent page evidence.
+
+        Inputs:
+            workspace_id: Exact hash-keyed Book Workspace identity.
+        Functionality:
+            Loads bounded page previews, printed/physical references, neighboring headings,
+            and suggested spans without starting detailed extraction.
+        Outputs:
+            JSON chapter catalog or a stable local error response.
+        Failures:
+            Converts PlanningRejected into its declared HTTP status and propagates unexpected
+            retained-source or filesystem failures.
+        """
+        try:
+            catalog = inspect_chapter_catalog(data_root, workspace_id)
+        except PlanningRejected as error:
+            return JSONResponse(
+                status_code=error.status_code,
+                content={
+                    "run_id": current_run().run_id,
+                    "error": {
+                        "code": error.code,
+                        "message": error.message,
+                        "details": error.details,
+                    },
+                },
+            )
+        return JSONResponse(content={"run_id": current_run().run_id, **catalog})
+
+    @app.post("/api/book-workspaces/{workspace_id}/plans")
+    @traced
+    async def confirm_source_chapter(
+        workspace_id: str, plan_request: ChapterPlanRequest
+    ) -> JSONResponse:
+        """Confirm one adjusted chapter span and produce its provisional Learning Plan.
+
+        Inputs:
+            workspace_id: Exact hash-keyed Book Workspace identity.
+            plan_request: Strict JSON selection, duration policy, and approval request.
+        Functionality:
+            Validates learner choices, runs span-scoped detailed extraction, packs atomic
+            Source Index nodes, and persists immutable plan evidence.
+        Outputs:
+            HTTP 201 for a confirmed plan, 409 for a visible approval/structure gate, or a
+            stable domain error response.
+        Failures:
+            Converts PlanningRejected into its declared HTTP status and propagates unexpected
+            extraction, JSON, or filesystem failures.
+        """
+        try:
+            outcome = confirm_chapter_plan(
+                data_root,
+                workspace_id,
+                heading_index=plan_request.heading_index,
+                start_physical_page=plan_request.start_physical_page,
+                end_physical_page=plan_request.end_physical_page,
+                minimum_minutes=plan_request.minimum_minutes,
+                maximum_minutes=plan_request.maximum_minutes,
+                allow_cross_chapter=plan_request.allow_cross_chapter,
+                approve_short_tail=plan_request.approve_short_tail,
+                boundary_note=plan_request.boundary_note,
+            )
+        except PlanningRejected as error:
+            current_run().record("validation_completed", outcome="rejected", error_code=error.code)
+            return JSONResponse(
+                status_code=error.status_code,
+                content={
+                    "run_id": current_run().run_id,
+                    "error": {
+                        "code": error.code,
+                        "message": error.message,
+                        "details": error.details,
+                    },
+                },
+            )
+        status = str(outcome["plan"]["status"])
+        return JSONResponse(
+            status_code=201 if status == "confirmed" else 409,
+            content={"run_id": current_run().run_id, **outcome},
+        )
+
+    @app.get("/api/book-workspaces/{workspace_id}/planning")
+    @traced
+    async def get_planning_state(workspace_id: str) -> JSONResponse:
+        """Inspect current duration policy and immutable Learning Plan history.
+
+        Inputs:
+            workspace_id: Exact hash-keyed Book Workspace identity.
+        Functionality:
+            Reads the replace-safe planning pointer and every referenced plan artifact.
+        Outputs:
+            JSON planning state or a stable local error response.
+        Failures:
+            Converts PlanningRejected into its declared HTTP status and propagates retained
+            artifact corruption or filesystem failures.
+        """
+        try:
+            planning = read_planning_state(data_root, workspace_id)
+        except PlanningRejected as error:
+            return JSONResponse(
+                status_code=error.status_code,
+                content={
+                    "run_id": current_run().run_id,
+                    "error": {
+                        "code": error.code,
+                        "message": error.message,
+                        "details": error.details,
+                    },
+                },
+            )
+        return JSONResponse(content={"run_id": current_run().run_id, **planning})
 
     @app.get("/api/runs/{run_id}")
     @traced
