@@ -2,11 +2,19 @@
 
 ## Completing implementation tickets
 
-After an implementation ticket passes its required tests and review, publish its
-current `codex/` branch to GitHub and open a draft pull request against the
-appropriate base branch. A ticket is not complete until:
+After implementation, run an adversarial QA gate through the public browser or
+HTTP boundary. Exercise the happy path, malformed and boundary inputs, unusual
+interaction order, retry or repeated-action behavior, persistence, traceability,
+and the ticket's most plausible failure modes. Turn every discovered defect into
+a regression test, fix it, and rerun the gate. Add a brief `QA Summary` to the
+ticket Markdown naming the scenarios exercised and their outcomes.
+
+After the QA gate and required review pass, publish the current `codex/` branch
+to GitHub and open a draft pull request against the appropriate base branch. A
+ticket is not complete until:
 
 - the implementation and ticket-status changes are committed;
+- the ticket contains a passing `QA Summary` with adversarial evidence;
 - the branch tracks its GitHub remote;
 - the draft pull request contains the change summary and validation evidence;
 - the branch name, commit hash, pull-request target, and pull-request URL are
