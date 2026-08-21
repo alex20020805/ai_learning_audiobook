@@ -85,11 +85,17 @@ def trace_value(value: object, *, key: str | None = None, depth: int = 0) -> Jso
     if value is None or isinstance(value, (bool, int, float)):
         return value
     if isinstance(value, Response):
-        return {
+        representation: dict[str, JsonValue] = {
             "type": type(value).__name__,
             "status_code": value.status_code,
-            "body": trace_value(value.body, depth=depth + 1),
         }
+        body = getattr(value, "body", None)
+        if body is not None:
+            representation["body"] = trace_value(body, depth=depth + 1)
+        path = getattr(value, "path", None)
+        if path is not None:
+            representation["path"] = trace_value(Path(str(path)), depth=depth + 1)
+        return representation
     if isinstance(value, bytes):
         return {
             "type": "bytes",

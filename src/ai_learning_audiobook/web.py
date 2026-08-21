@@ -83,6 +83,21 @@ PRIVATE_APPLICATION_HTML = """<!doctype html>
       <p id="planning-status" role="status" aria-live="polite"></p>
       <pre id="planning-result" aria-label="Learning Plan result">No plan created.</pre>
     </section>
+    <section id="generation" class="planning" hidden>
+      <h2>Generate a deterministic verbatim Episode</h2>
+      <p>This test path uses no network or paid credit. It retains the complete script,
+        transformations, transcript, 24 kHz WAV, validation, provenance, cost, and trace.</p>
+      <label for="generation-session">Confirmed Listening Session</label>
+      <select id="generation-session"></select>
+      <button id="generate-episode" type="button">Generate deterministic Episode</button>
+      <p id="generation-status" role="status" aria-live="polite"></p>
+      <pre id="generation-result" aria-label="Episode Generation result">No Episode generated.</pre>
+      <audio id="episode-audio" controls hidden></audio>
+      <h3>Durable FIFO queue</h3>
+      <pre id="queue-result" aria-label="Generation queue">Queue not loaded.</pre>
+      <button id="refresh-episodes" type="button">Refresh retained Episodes</button>
+      <pre id="episode-result" aria-label="Retained Episodes">No retained Episodes loaded.</pre>
+    </section>
   </main>
   <script>
     const fileInput = document.querySelector("#source-document");
@@ -105,7 +120,17 @@ PRIVATE_APPLICATION_HTML = """<!doctype html>
     const confirmChapterButton = document.querySelector("#confirm-chapter");
     const planningStatus = document.querySelector("#planning-status");
     const planningResult = document.querySelector("#planning-result");
+    const generationSection = document.querySelector("#generation");
+    const generationSessionInput = document.querySelector("#generation-session");
+    const generateEpisodeButton = document.querySelector("#generate-episode");
+    const generationStatus = document.querySelector("#generation-status");
+    const generationResult = document.querySelector("#generation-result");
+    const queueResult = document.querySelector("#queue-result");
+    const refreshEpisodesButton = document.querySelector("#refresh-episodes");
+    const episodeResult = document.querySelector("#episode-result");
+    const episodeAudio = document.querySelector("#episode-audio");
     let activeWorkspaceId = null;
+    let activePlanId = null;
     let chapterCatalog = [];
 
     /**
@@ -169,6 +194,7 @@ PRIVATE_APPLICATION_HTML = """<!doctype html>
       }
       planningSection.hidden = false;
       renderChapterSelection();
+      await loadGenerationContext();
     }
 
     /**
@@ -231,6 +257,183 @@ PRIVATE_APPLICATION_HTML = """<!doctype html>
     }
 
     /**
+     * Inputs: payload, a generation response or retained Episode record.
+     * Functionality: presents bounded job, lifecycle, artifact, validation, provider, and cost
+     * evidence without duplicating a complete copyrighted script or binary audio in the UI.
+     * Outputs: a compact JSON-compatible learner inspection mapping.
+     * Failures: returns a small error envelope unchanged when generation was rejected.
+     */
+    function summarizeEpisodePayload(payload) {
+      if (payload.error) return {run_id: payload.run_id, error: payload.error};
+      const episode = payload.episode || payload;
+      const job = payload.job || {};
+      return {
+        run_id: payload.run_id,
+        episode: {
+          episode_id: episode.episode_id,
+          status: episode.status,
+          plan_id: episode.plan_id,
+          session_number: episode.session_number,
+          source_span: episode.source_span,
+          estimated_listening_minutes: episode.estimated_listening_minutes,
+          generated_test_audio_seconds: episode.generated_test_audio_seconds,
+          script_segment_count: episode.script_segment_count,
+          current_job_id: episode.current_job_id,
+          current_job_version: episode.current_job_version,
+          artifact_refs: episode.artifact_refs,
+          validation_passed: episode.validation?.passed,
+          provider_policy_version: episode.provider_provenance?.policy_version,
+          network_used: episode.provider_provenance?.network_used,
+          paid_usage: episode.provider_provenance?.paid_usage,
+          total_cost_usd: episode.cost?.total_usd,
+          trace_manifest_ref: episode.trace_manifest_ref
+        },
+        job: job.job_id ? {
+          job_id: job.job_id,
+          version: job.version,
+          status: job.status,
+          compatibility_sha256: job.pins?.compatibility_sha256,
+          transitions: (job.transitions || []).map((transition) => transition.to)
+        } : undefined
+      };
+    }
+
+    /**
+     * Inputs: plan, one confirmed immutable Learning Plan mapping.
+     * Functionality: selects the active plan, populates all available Listening Sessions, and
+     * exposes deterministic generation controls.
+     * Outputs: undefined after synchronously updating browser state and controls.
+     * Failures: hides generation and returns when the plan is missing or not confirmed.
+     */
+    function configureGeneration(plan) {
+      if (!plan || plan.status !== "confirmed") {
+        activePlanId = null;
+        generationSection.hidden = true;
+        return;
+      }
+      activePlanId = plan.plan_id;
+      generationSessionInput.replaceChildren();
+      for (const session of plan.listening_sessions) {
+        const option = new Option(
+          `Session ${session.session_number} — ${session.estimated_minutes.toFixed(2)} minutes`,
+          session.session_number
+        );
+        generationSessionInput.append(option);
+      }
+      generationSection.hidden = false;
+    }
+
+    /**
+     * Inputs: none; uses the active Book Workspace set by chapter inspection or import.
+     * Functionality: restores the latest confirmed plan after reload and refreshes durable
+     * queue and retained Episode evidence even when no generation has run in this page session.
+     * Outputs: Promise<void> after all available retained generation state is displayed.
+     * Failures: treats missing planning as an empty generation state and propagates other
+     * transport or JSON failures.
+     */
+    async function loadGenerationContext() {
+      if (!activeWorkspaceId) return;
+      const response = await fetch(`/api/book-workspaces/${activeWorkspaceId}/planning`);
+      const payload = await response.json();
+      if (response.ok) {
+        const confirmed = [...payload.plans].reverse().find((plan) => plan.status === "confirmed");
+        configureGeneration(confirmed);
+      } else if (payload.error?.code !== "planning_not_started") {
+        throw new Error(payload.error.message);
+      }
+      await refreshGenerationQueue();
+      await refreshRetainedEpisodes();
+    }
+
+    /**
+     * Inputs: none; reads the public single-queue endpoint.
+     * Functionality: displays FIFO sequence, active-job identity/count, and durable job states.
+     * Outputs: Promise<void> after the bounded queue mapping is rendered.
+     * Failures: rejects when the queue request or JSON parsing fails.
+     */
+    async function refreshGenerationQueue() {
+      const response = await fetch("/api/generation-queue");
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error.message);
+      queueResult.textContent = JSON.stringify(payload.queue, null, 2);
+    }
+
+    /**
+     * Inputs: none; reads the active workspace and its retained Episode collection endpoint.
+     * Functionality: lists bounded ready-Episode evidence and restores the latest audio player
+     * source without loading or embedding the audio bytes eagerly.
+     * Outputs: Promise<void> after retained Episode summaries and player URL are updated.
+     * Failures: rejects for an unavailable workspace collection or invalid JSON.
+     */
+    async function refreshRetainedEpisodes() {
+      if (!activeWorkspaceId) return;
+      const response = await fetch(`/api/book-workspaces/${activeWorkspaceId}/episodes`);
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error.message);
+      const summaries = payload.episodes.map((episode) => summarizeEpisodePayload(episode).episode);
+      episodeResult.textContent = JSON.stringify(summaries, null, 2);
+      const latest = payload.episodes.at(-1);
+      if (latest) {
+        episodeAudio.src = `/api/book-workspaces/${activeWorkspaceId}/episodes/`
+          + `${latest.episode_id}/audio`;
+        episodeAudio.hidden = false;
+      }
+    }
+
+    /**
+     * Inputs: none; reads the active plan and selected Listening Session controls.
+     * Functionality: starts one deterministic no-network Generation Job, presents bounded
+     * ready evidence, and refreshes queue, retained Episode, and audio-player state.
+     * Outputs: Promise<void> after success or learner-visible rejection is rendered.
+     * Failures: catches transport/JSON failures, reports them, and always re-enables the button.
+     */
+    async function submitEpisodeGeneration() {
+      if (!activeWorkspaceId || !activePlanId) {
+        generationStatus.textContent = "Confirm a Learning Plan first.";
+        return;
+      }
+      generateEpisodeButton.disabled = true;
+      generationStatus.textContent = "Running the deterministic verbatim pipeline…";
+      try {
+        const response = await fetch(`/api/book-workspaces/${activeWorkspaceId}/episodes`, {
+          method: "POST",
+          headers: {"content-type": "application/json"},
+          body: JSON.stringify({
+            plan_id: activePlanId,
+            session_number: Number(generationSessionInput.value)
+          })
+        });
+        const payload = await response.json();
+        generationResult.textContent = JSON.stringify(summarizeEpisodePayload(payload), null, 2);
+        generationStatus.textContent = response.ok
+          ? "Deterministic Episode is ready and retained locally."
+          : payload.error.message;
+        await refreshGenerationQueue();
+        await refreshRetainedEpisodes();
+      } catch (error) {
+        generationStatus.textContent = `Generation failed: ${error.message}`;
+      } finally {
+        generateEpisodeButton.disabled = false;
+      }
+    }
+
+    /**
+     * Inputs: none; uses the active workspace selected in the browser.
+     * Functionality: refreshes both durable FIFO queue evidence and retained ready Episodes
+     * after an explicit learner action.
+     * Outputs: Promise<void> after both browser result panels are current.
+     * Failures: catches transport or parsing failures and reports them in generation status.
+     */
+    async function refreshGenerationView() {
+      try {
+        await refreshGenerationQueue();
+        await refreshRetainedEpisodes();
+      } catch (error) {
+        generationStatus.textContent = `Refresh failed: ${error.message}`;
+      }
+    }
+
+    /**
      * Inputs: none; reads the visible chapter, page, policy, and approval controls.
      * Functionality: confirms the adjusted span through the Local Orchestrator and presents
      * immutable Source Index and Learning Plan evidence, including any blocking gate.
@@ -268,6 +471,7 @@ PRIVATE_APPLICATION_HTML = """<!doctype html>
         } else {
           planningStatus.textContent = response.ok
             ? "Learning Plan confirmed." : payload.error.message;
+          if (response.ok) configureGeneration(payload.plan);
         }
       } catch (error) {
         planningStatus.textContent = `Planning failed: ${error.message}`;
@@ -307,6 +511,8 @@ PRIVATE_APPLICATION_HTML = """<!doctype html>
     chapterInput.addEventListener("change", renderChapterSelection);
     confirmChapterButton.addEventListener("click", submitChapterPlan);
     inspectWorkspaceButton.addEventListener("click", inspectRetainedWorkspace);
+    generateEpisodeButton.addEventListener("click", submitEpisodeGeneration);
+    refreshEpisodesButton.addEventListener("click", refreshGenerationView);
 
     refreshWorkspaces().catch((error) => {
       status.textContent = `Could not list prior editions: ${error.message}`;

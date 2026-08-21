@@ -7,10 +7,19 @@ from pathlib import Path
 from typing import Annotated
 
 from fastapi import Body, FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict
 from starlette.responses import Response
 
+from ai_learning_audiobook.generation_service import (
+    GenerationRejected,
+    generate_episode,
+    list_retained_episodes,
+    queue_view,
+    read_generation_queue,
+    read_retained_episode,
+    retained_audio_path,
+)
 from ai_learning_audiobook.import_service import (
     SourceRejected,
     import_source_document_content,
@@ -39,6 +48,15 @@ class ChapterPlanRequest(BaseModel):
     allow_cross_chapter: bool = False
     approve_short_tail: bool = False
     boundary_note: str = ""
+
+
+class EpisodeGenerationRequest(BaseModel):
+    """Strict HTTP input for one deterministic Episode Generation Job."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    plan_id: str
+    session_number: int
 
 
 def create_app(data_root: Path) -> FastAPI:
@@ -325,6 +343,163 @@ def create_app(data_root: Path) -> FastAPI:
                 },
             )
         return JSONResponse(content={"run_id": current_run().run_id, **planning})
+
+    @app.post("/api/book-workspaces/{workspace_id}/episodes")
+    @traced
+    async def start_episode_generation(
+        workspace_id: str, generation_request: EpisodeGenerationRequest
+    ) -> JSONResponse:
+        """Generate one retained verbatim Episode through deterministic fake adapters.
+
+        Inputs:
+            workspace_id: Exact hash-keyed Book Workspace identity.
+            generation_request: Strict confirmed plan and Listening Session selection.
+        Functionality:
+            Creates a versioned pinned job, advances it through the durable FIFO lifecycle,
+            validates every required artifact, and publishes only a complete ready Episode.
+        Outputs:
+            HTTP 201 with bounded Episode, job, and queue evidence or a stable rejection.
+        Failures:
+            Converts GenerationRejected into its declared HTTP response and propagates
+            unexpected filesystem, JSON, audio, or trace failures.
+        """
+        try:
+            outcome = generate_episode(
+                data_root,
+                workspace_id,
+                plan_id=generation_request.plan_id,
+                session_number=generation_request.session_number,
+            )
+        except GenerationRejected as error:
+            current_run().record("validation_completed", outcome="rejected", error_code=error.code)
+            return JSONResponse(
+                status_code=error.status_code,
+                content={
+                    "run_id": current_run().run_id,
+                    "error": {
+                        "code": error.code,
+                        "message": error.message,
+                        "details": error.details,
+                    },
+                },
+            )
+        return JSONResponse(status_code=201, content={"run_id": current_run().run_id, **outcome})
+
+    @app.get("/api/generation-queue")
+    @traced
+    async def get_generation_queue() -> JSONResponse:
+        """Inspect the single durable FIFO Episode-generation queue.
+
+        Inputs:
+            None.
+        Functionality:
+            Loads ordered queue history and computes the current active-job count.
+        Outputs:
+            JSON queue evidence with at most one active job under valid operation.
+        Failures:
+            Propagates filesystem or JSON errors when retained queue state is corrupt.
+        """
+        return JSONResponse(
+            content={
+                "run_id": current_run().run_id,
+                "queue": queue_view(read_generation_queue(data_root)),
+            }
+        )
+
+    @app.get("/api/book-workspaces/{workspace_id}/episodes")
+    @traced
+    async def get_retained_episodes(workspace_id: str) -> JSONResponse:
+        """List complete ready Episodes retained in one Book Workspace.
+
+        Inputs:
+            workspace_id: Exact hash-keyed Book Workspace identity.
+        Functionality:
+            Reads only atomically published Episode records and ignores partial job work.
+        Outputs:
+            JSON list of retained ready Episode summaries.
+        Failures:
+            Converts GenerationRejected into a stable response and propagates corrupt JSON.
+        """
+        try:
+            episodes = list_retained_episodes(data_root, workspace_id)
+        except GenerationRejected as error:
+            return JSONResponse(
+                status_code=error.status_code,
+                content={
+                    "run_id": current_run().run_id,
+                    "error": {
+                        "code": error.code,
+                        "message": error.message,
+                        "details": error.details,
+                    },
+                },
+            )
+        return JSONResponse(content={"run_id": current_run().run_id, "episodes": episodes})
+
+    @app.get("/api/book-workspaces/{workspace_id}/episodes/{episode_id}")
+    @traced
+    async def get_retained_episode(workspace_id: str, episode_id: str) -> JSONResponse:
+        """Inspect a ready Episode and every structured trust artifact.
+
+        Inputs:
+            workspace_id: Exact hash-keyed Book Workspace identity.
+            episode_id: Exact content-derived Episode identity.
+        Functionality:
+            Loads the current job plus script, transcript, transformations, coverage,
+            validation, provenance, and cost evidence without embedding binary audio.
+        Outputs:
+            JSON complete Episode evidence or a stable missing-identity response.
+        Failures:
+            Converts GenerationRejected into its declared HTTP response and propagates JSON
+            corruption for incomplete retained artifacts.
+        """
+        try:
+            episode = read_retained_episode(data_root, workspace_id, episode_id)
+        except GenerationRejected as error:
+            return JSONResponse(
+                status_code=error.status_code,
+                content={
+                    "run_id": current_run().run_id,
+                    "error": {
+                        "code": error.code,
+                        "message": error.message,
+                        "details": error.details,
+                    },
+                },
+            )
+        return JSONResponse(content={"run_id": current_run().run_id, **episode})
+
+    @app.get("/api/book-workspaces/{workspace_id}/episodes/{episode_id}/audio")
+    @traced
+    async def get_retained_episode_audio(workspace_id: str, episode_id: str) -> Response:
+        """Stream one retained validated deterministic WAV artifact.
+
+        Inputs:
+            workspace_id: Exact hash-keyed Book Workspace identity.
+            episode_id: Exact content-derived Episode identity.
+        Functionality:
+            Resolves only the published current job audio and returns it with a fixed MIME type.
+        Outputs:
+            FileResponse for valid audio or a stable JSON rejection response.
+        Failures:
+            Converts GenerationRejected into its declared HTTP response and propagates
+            unexpected filesystem streaming errors.
+        """
+        try:
+            path = retained_audio_path(data_root, workspace_id, episode_id)
+        except GenerationRejected as error:
+            return JSONResponse(
+                status_code=error.status_code,
+                content={
+                    "run_id": current_run().run_id,
+                    "error": {
+                        "code": error.code,
+                        "message": error.message,
+                        "details": error.details,
+                    },
+                },
+            )
+        return FileResponse(path, media_type="audio/wav", filename=f"{episode_id}.wav")
 
     @app.get("/api/runs/{run_id}")
     @traced
